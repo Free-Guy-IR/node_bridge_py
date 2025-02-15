@@ -25,7 +25,7 @@ with open(server_ca_file, "r") as f:
 
 async def main():
     node = Bridge.create_node(
-        connection=Bridge.NodeType.GRPC,
+        connection=Bridge.NodeType.REST,
         address=address,
         port=port,
         client_cert=client_cert_content,
@@ -33,7 +33,7 @@ async def main():
         server_ca=server_ca_content,
     )
 
-    await node.start(config, service.BackendType.XRAY, [])
+    await node.start(config, service.BackendType.XRAY, [], timeout=5)
 
     user = Bridge.create_user(
         email="jeff", proxies=Bridge.create_proxy(vmess_id="0d59268a-9847-4218-ae09-65308eb52e08"), inbounds=[]
