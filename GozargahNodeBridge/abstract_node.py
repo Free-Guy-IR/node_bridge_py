@@ -1,9 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
-import asyncio
+from typing import List
 
 from GozargahNodeBridge.common import service_pb2 as service
-from GozargahNodeBridge.controller import Controller, Health
+from GozargahNodeBridge.controller import Controller
 
 
 class GozargahNode(Controller, ABC):
