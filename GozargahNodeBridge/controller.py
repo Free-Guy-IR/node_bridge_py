@@ -108,7 +108,7 @@ class Controller:
     @property
     async def core_version(self) -> str:
         async with self._lock.reader_lock:
-            return self.core_version
+            return self._core_version
 
     async def connect(self, node_version: str, core_version: str, tasks: List[asyncio.Task] = []):
         async with self._lock.writer_lock:
