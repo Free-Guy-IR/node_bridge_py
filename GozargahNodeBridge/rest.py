@@ -51,7 +51,7 @@ class Node(GozargahNode):
                 raise NodeAPIError(code=-2, detail=f"Error deserialising protobuf: {e}")
         return proto_instance
 
-    def _handle_error(error: Exception):
+    def _handle_error(self, error: Exception):
         if isinstance(error, httpx.RemoteProtocolError):
             raise NodeAPIError(code=-1, detail=f"Server closed connection: {error}")
         elif isinstance(error, httpx.HTTPStatusError):
