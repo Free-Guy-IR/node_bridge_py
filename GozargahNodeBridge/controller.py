@@ -103,7 +103,7 @@ class Controller:
     @property
     async def node_version(self) -> str:
         async with self._lock.reader_lock:
-            return self.node_version
+            return self._node_version
 
     @property
     async def core_version(self) -> str:
