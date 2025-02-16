@@ -92,7 +92,7 @@ class Controller:
         await self.connected()
         async with self._lock.writer_lock:
             if self._user_queue:
-                user["inbounds"] = []
+                user.inbounds.clear()
                 await self._user_queue.put(user)
 
     async def get_logs(self) -> Optional[asyncio.Queue]:
