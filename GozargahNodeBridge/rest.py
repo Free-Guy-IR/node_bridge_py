@@ -309,6 +309,8 @@ class Node(GozargahNode):
             # Handle UserChan message
             if user_task in done:
                 user = user_task.result()
+                if user is None:
+                    continue
 
                 try:
                     await self._make_request(
