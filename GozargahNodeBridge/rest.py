@@ -218,7 +218,7 @@ class Node(GozargahNode):
 
     async def sync_users(self, users: List[service.User], timeout: int = 10) -> service.Empty | None:
         await self.connected()
-        async with self._node_lock.reader_lock:
+        async with self._node_lock.writer_lock:
             return await self._make_request(
                 method="POST",
                 endpoint="users/sync",
