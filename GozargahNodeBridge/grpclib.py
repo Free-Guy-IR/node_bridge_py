@@ -252,6 +252,8 @@ class Node(GozargahNode):
                     await stream.send_message(service.Empty())
                     while True:
                         log = await stream.recv_message()
+                        if log is None:
+                            continue
                         await self._logs_queue.put(log.detail)
 
             except Exception as e:
