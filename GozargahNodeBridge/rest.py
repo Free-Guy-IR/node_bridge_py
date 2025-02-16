@@ -4,8 +4,7 @@ from typing import List
 
 
 from aiorwlock import RWLock
-from google.protobuf.message import Message
-
+from google.protobuf.message import Message, DecodeError
 from GozargahNodeBridge.controller import NodeAPIError, Health
 from GozargahNodeBridge.common import service_pb2 as service
 from GozargahNodeBridge.abstract_node import GozargahNode
