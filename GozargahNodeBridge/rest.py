@@ -46,7 +46,10 @@ class Node(GozargahNode):
     def _deserialize_protobuf(self, proto_class: type[Message], data: bytes) -> Message:
         """Deserialize bytes into a protobuf message."""
         proto_instance = proto_class()
-        proto_instance.ParseFromString(data)
+        try:
+            proto_instance.ParseFromString(data)
+        except DecodeError as e:
+                raise NodeAPIError(code=-2, detail=f"Error deserialising protobuf: {e}")
         return proto_instance
 
     def _handle_error(error: Exception):
