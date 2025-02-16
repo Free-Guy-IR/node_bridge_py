@@ -199,7 +199,7 @@ class Node(GozargahNode):
 
         async with self._node_lock.reader_lock:
             return await self._handle_grpc_request(
-                method=self._client.GetInboundStats,
+                method=self._client.GetUserStats,
                 request=service.StatRequest(name=email, reset=reset),
                 timeout=timeout,
             )
