@@ -219,7 +219,7 @@ class Node(GozargahNode):
 
         async with self._node_lock.writer_lock:
             return await self._handle_grpc_request(
-                method=self._client.GetOutboundsStats,
+                method=self._client.SyncUsers,
                 request=service.Users(users=users),
                 timeout=timeout,
             )
