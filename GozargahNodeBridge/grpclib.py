@@ -295,6 +295,8 @@ class Node(GozargahNode):
                 # Handle UserChan message
                 if user_task in done:
                     user = user_task.result()
+                    if user is None:
+                        continue
 
                     try:
                         # Send the user through the gRPC stream
