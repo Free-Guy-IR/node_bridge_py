@@ -1,9 +1,9 @@
 import asyncio
 import logging
+import math
 import ssl
 from enum import IntEnum
 from json import JSONDecodeError
-import math
 from typing import Optional
 from uuid import UUID
 
@@ -239,6 +239,58 @@ class Controller:
         async with self._version_lock:
             return self._extra
 
+    @staticmethod
+    def _parse_version_tuple(version: str) -> tuple[int, ...]:
+        """Parse semver-like strings into a tuple of ints for comparison."""
+        if not version:
+            return ()
+
+        cleaned = version.strip()
+        if cleaned.startswith(("v", "V")):
+            cleaned = cleaned[1:]
+
+        # Drop build metadata and pre-release suffixes
+        cleaned = cleaned.split("+", 1)[0]
+        cleaned = cleaned.split("-", 1)[0]
+
+        numbers: list[int] = []
+        for part in cleaned.split("."):
+            digits = ""
+            for ch in part:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            if digits:
+                numbers.append(int(digits))
+            else:
+                numbers.append(0)
+
+        # Trim trailing zeros for cleaner comparisons
+        while numbers and numbers[-1] == 0:
+            numbers.pop()
+
+        return tuple(numbers)
+
+    @classmethod
+    def _is_version_at_least(cls, version: str, minimum: str) -> bool:
+        current = cls._parse_version_tuple(version)
+        target = cls._parse_version_tuple(minimum)
+
+        if not current or not target:
+            return False
+
+        max_len = max(len(current), len(target))
+        current = current + (0,) * (max_len - len(current))
+        target = target + (0,) * (max_len - len(target))
+
+        return current >= target
+
+    async def _supports_chunked_sync(self) -> tuple[bool, str]:
+        """Check if the connected node supports chunked sync (>= v0.2.0)."""
+        node_version = await self.node_version()
+        return self._is_version_at_least(node_version, "0.2.0"), node_version
+
     async def connect(self, node_version: str, core_version: str, tasks: list | None = None):
         # Validate versions are not empty
         if not node_version or not core_version:
@@ -369,6 +421,11 @@ class Controller:
         self.logger.debug(f"[{self.name}] Sync worker started")
         retry_delay = 1.0
         max_retry_delay = 30.0
+        supports_chunked, node_version = await self._supports_chunked_sync()
+        if not supports_chunked:
+            self.logger.debug(
+                f"[{self.name}] Chunked sync disabled for node version '{node_version or 'unknown'}' (< v0.2.0)"
+            )
 
         try:
             while not self.is_shutting_down():
@@ -402,7 +459,7 @@ class Controller:
                     continue
 
                 # Prefer chunked sync for large batches to reduce per-request overhead
-                use_chunked = len(users) >= 1000
+                use_chunked = supports_chunked and len(users) >= 1000
                 if use_chunked:
                     # Aim for ~10 chunks, cap size to 2000 to stay under server limits
                     chunk_size = min(2000, max(1, math.ceil(len(users) / 10)))
@@ -429,9 +486,7 @@ class Controller:
                     try:
                         failed_users = await self._sync_batch_users(users)
                         if failed_users:
-                            self.logger.warning(
-                                f"[{self.name}] {len(failed_users)}/{len(users)} users failed to sync"
-                            )
+                            self.logger.warning(f"[{self.name}] {len(failed_users)}/{len(users)} users failed to sync")
                             await self._requeue_failed_users(failed_users)
                             await self._increment_user_sync_failure()
                             # Exponential backoff on partial failure
