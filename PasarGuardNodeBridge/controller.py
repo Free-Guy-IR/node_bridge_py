@@ -7,7 +7,9 @@ from json import JSONDecodeError
 from typing import Optional
 from uuid import UUID
 
+
 import httpx
+from packaging.version import InvalidVersion, Version
 
 from PasarGuardNodeBridge.common.service_pb2 import User
 
@@ -240,10 +242,10 @@ class Controller:
             return self._extra
 
     @staticmethod
-    def _parse_version_tuple(version: str) -> tuple[int, ...]:
-        """Parse semver-like strings into a tuple of ints for comparison."""
+    def _parse_version(version: str) -> Version | None:
+        """Parse semver-like strings into a packaging Version for comparison."""
         if not version:
-            return ()
+            return None
 
         cleaned = version.strip()
         if cleaned.startswith(("v", "V")):
@@ -253,36 +255,18 @@ class Controller:
         cleaned = cleaned.split("+", 1)[0]
         cleaned = cleaned.split("-", 1)[0]
 
-        numbers: list[int] = []
-        for part in cleaned.split("."):
-            digits = ""
-            for ch in part:
-                if ch.isdigit():
-                    digits += ch
-                else:
-                    break
-            if digits:
-                numbers.append(int(digits))
-            else:
-                numbers.append(0)
-
-        # Trim trailing zeros for cleaner comparisons
-        while numbers and numbers[-1] == 0:
-            numbers.pop()
-
-        return tuple(numbers)
+        try:
+            return Version(cleaned)
+        except InvalidVersion:
+            return None
 
     @classmethod
     def _is_version_at_least(cls, version: str, minimum: str) -> bool:
-        current = cls._parse_version_tuple(version)
-        target = cls._parse_version_tuple(minimum)
+        current = cls._parse_version(version)
+        target = cls._parse_version(minimum)
 
-        if not current or not target:
+        if current is None or target is None:
             return False
-
-        max_len = max(len(current), len(target))
-        current = current + (0,) * (max_len - len(current))
-        target = target + (0,) * (max_len - len(target))
 
         return current >= target
 

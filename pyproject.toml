@@ -12,7 +12,7 @@ keywords = [
 ]
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["grpclib>=0.4.8", "httpx>=0.28.1", "protobuf>=6.31.1"]
+dependencies = ["grpclib>=0.4.8", "httpx>=0.28.1", "packaging>=23.1", "protobuf>=6.31.1"]
 
 classifiers = ["Programming Language :: Python :: 3.12"]
 
