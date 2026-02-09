@@ -1,6 +1,6 @@
 [project]
 name = "pasarguard-node-bridge"
-version = "0.4.1"
+version = "0.4.2"
 description = "python package to connect your project with PasarGuard node go"
 url = "https://github.com/PasarGuard/node_bridge_py"
 keywords = [
@@ -12,7 +12,12 @@ keywords = [
 ]
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["grpclib>=0.4.8", "httpx>=0.28.1", "packaging>=23.1", "protobuf>=6.31.1"]
+dependencies = [
+    "grpclib>=0.4.8",
+    "httpx>=0.28.1",
+    "packaging>=23.1",
+    "protobuf>=6.31.1",
+]
 
 classifiers = ["Programming Language :: Python :: 3.12"]
 
