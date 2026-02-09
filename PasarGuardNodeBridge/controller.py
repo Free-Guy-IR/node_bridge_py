@@ -7,7 +7,6 @@ from json import JSONDecodeError
 from typing import Optional
 from uuid import UUID
 
-
 import httpx
 from packaging.version import InvalidVersion, Version
 
@@ -247,13 +246,9 @@ class Controller:
         if not version:
             return None
 
-        cleaned = version.strip()
-        if cleaned.startswith(("v", "V")):
-            cleaned = cleaned[1:]
-
         # Drop build metadata and pre-release suffixes
-        cleaned = cleaned.split("+", 1)[0]
-        cleaned = cleaned.split("-", 1)[0]
+        cleaned = version.split("+", 1)[0]
+        cleaned = version.split("-", 1)[0]
 
         try:
             return Version(cleaned)
