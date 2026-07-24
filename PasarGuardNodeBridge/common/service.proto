@@ -16,6 +16,7 @@ message BaseInfoResponse {
 enum BackendType {
   XRAY = 0;
   WIREGUARD = 1;
+  SING_BOX = 2;
 }
 
 message Backend {
@@ -137,6 +138,12 @@ message Hysteria {
   string auth = 1;
 }
 
+// sing-box Hysteria2 inbound user credential (distinct from xray-cores
+// native Hysteria v1 auth string above - Hysteria2 uses a password).
+message Hysteria2 {
+  string password = 1;
+}
+
 message Proxy {
   Vmess vmess = 1;
   Vless vless = 2;
@@ -144,6 +151,7 @@ message Proxy {
   Shadowsocks shadowsocks = 4;
   Wireguard wireguard = 5;
   Hysteria hysteria = 6;
+  Hysteria2 hysteria2 = 7;
 }
 
 message User {
