@@ -1,5 +1,7 @@
 # PasarGuard Node Bridge (Python)
 
+> Note: This is the [Free-Guy-IR](https://github.com/Free-Guy-IR) fork of the original [PasarGuard node_bridge_py](https://github.com/PasarGuard/node_bridge_py), extended with sing-box (Hysteria2) and OpenVPN proxy types.
+
 Async Python client for connecting to a [PasarGuard node](https://github.com/PasarGuard/node) over `gRPC` or `REST`.
 
 This package provides:
