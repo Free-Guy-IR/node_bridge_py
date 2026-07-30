@@ -239,12 +239,14 @@ class Hysteria2(_message.Message):
     def __init__(self, password: _Optional[str] = ...) -> None: ...
 
 class OpenVpnUser(_message.Message):
-    __slots__ = ("username", "password")
+    __slots__ = ("username", "password", "max_concurrent_connections")
     USERNAME_FIELD_NUMBER: _ClassVar[int]
     PASSWORD_FIELD_NUMBER: _ClassVar[int]
+    MAX_CONCURRENT_CONNECTIONS_FIELD_NUMBER: _ClassVar[int]
     username: str
     password: str
-    def __init__(self, username: _Optional[str] = ..., password: _Optional[str] = ...) -> None: ...
+    max_concurrent_connections: int
+    def __init__(self, username: _Optional[str] = ..., password: _Optional[str] = ..., max_concurrent_connections: _Optional[int] = ...) -> None: ...
 
 class Proxy(_message.Message):
     __slots__ = ("vmess", "vless", "trojan", "shadowsocks", "wireguard", "hysteria", "hysteria2", "open_vpn")

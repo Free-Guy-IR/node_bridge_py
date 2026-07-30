@@ -151,6 +151,13 @@ message Hysteria2 {
 message OpenVpnUser {
     string username = 1;
     string password = 2;
+    // Max concurrent OpenVPN sessions allowed for this user, reusing the
+    // panel-wide User.hwid_limit field's numeric value (0 or unset = unlimited).
+    // This is a concurrent-connection cap, distinct from hwid_limit'''s original
+    // meaning for Xray (a cap on distinct device fingerprints ever seen) - OpenVPN
+    // has no comparable device-fingerprint concept, so the same admin-facing number
+    // is reinterpreted here as a live-session cap instead.
+    uint32 max_concurrent_connections = 3;
 }
 
 message Proxy {
