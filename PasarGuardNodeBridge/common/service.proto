@@ -16,6 +16,8 @@ message BaseInfoResponse {
 enum BackendType {
   XRAY = 0;
   WIREGUARD = 1;
+  SING_BOX = 2;
+  OPEN_VPN = 3;
 }
 
 message Backend {
@@ -28,7 +30,7 @@ message Backend {
 
 // log
 message Log {
-  string detail = 1;
+    string detail = 1;
 }
 
 // stats
@@ -87,69 +89,92 @@ message LatencyResponse {
 }
 
 message BackendStatsResponse {
-  uint32 num_goroutine = 1;
-  uint32 num_gc = 2;
-  uint64 alloc = 3;
-  uint64 total_alloc = 4;
-  uint64 sys = 5;
-  uint64 mallocs = 6;
-  uint64 frees = 7;
-  uint64 live_objects = 8;
-  uint64 pause_total_ns = 9;
-  uint32 uptime = 10;
+    uint32 num_goroutine = 1;
+    uint32 num_gc = 2;
+    uint64 alloc = 3;
+    uint64 total_alloc = 4;
+    uint64 sys = 5;
+    uint64 mallocs = 6;
+    uint64 frees = 7;
+    uint64 live_objects = 8;
+    uint64 pause_total_ns = 9;
+    uint32 uptime = 10;
 }
 
 message SystemStatsResponse {
-  uint64 mem_total = 1;
-  uint64 mem_used = 2;
-  uint64 cpu_cores = 3;
-  double cpu_usage = 4;
-  uint64 incoming_bandwidth_speed = 5;
-  uint64 outgoing_bandwidth_speed = 6;
-  uint64 uptime = 7;
+    uint64 mem_total = 1;
+    uint64 mem_used = 2;
+    uint64 cpu_cores = 3;
+    double cpu_usage = 4;
+    uint64 incoming_bandwidth_speed = 5;
+    uint64 outgoing_bandwidth_speed = 6;
+    uint64 uptime = 7;
 }
 
 // User
 message Vmess {
-  string id = 1;
+    string id = 1;
 }
 
 message Vless {
-  string id = 1;
-  string flow = 2;
+    string id = 1;
+    string flow = 2;
 }
 
 message Trojan {
-  string password = 1;
+    string password = 1;
 }
 
 message Shadowsocks {
-  string password = 1;
-  string method = 2;
+    string password = 1;
+    string method = 2;
 }
 
 message Wireguard {
-  string public_key = 1;
-  repeated string peer_ips = 2;
+    string public_key = 1;
+    repeated string peer_ips = 2;
 }
 
 message Hysteria {
-  string auth = 1;
+    string auth = 1;
+}
+
+// sing-box Hysteria2 inbound user credential (distinct from xray-core's
+// native "Hysteria" v1 auth string above — Hysteria2 uses a password).
+message Hysteria2 {
+    string password = 1;
+}
+
+// OpenVPN uses --auth-user-pass-verify / --management-client-auth
+// (no per-user client certificate) - username plus password is the full
+// per-user credential, matching every other password-based protocol here.
+message OpenVpnUser {
+    string username = 1;
+    string password = 2;
+    // Max concurrent OpenVPN sessions allowed for this user, reusing the
+    // panel-wide User.hwid_limit field's numeric value (0 or unset = unlimited).
+    // This is a concurrent-connection cap, distinct from hwid_limit'''s original
+    // meaning for Xray (a cap on distinct device fingerprints ever seen) - OpenVPN
+    // has no comparable device-fingerprint concept, so the same admin-facing number
+    // is reinterpreted here as a live-session cap instead.
+    uint32 max_concurrent_connections = 3;
 }
 
 message Proxy {
-  Vmess vmess = 1;
-  Vless vless = 2;
-  Trojan trojan = 3;
-  Shadowsocks shadowsocks = 4;
-  Wireguard wireguard = 5;
-  Hysteria hysteria = 6;
+    Vmess vmess = 1;
+    Vless vless = 2;
+    Trojan trojan = 3;
+    Shadowsocks shadowsocks = 4;
+    Wireguard wireguard = 5;
+    Hysteria hysteria = 6;
+    Hysteria2 hysteria2 = 7;
+    OpenVpnUser open_vpn = 8;
 }
 
 message User {
-  string email = 1;
-  Proxy proxies = 2;
-  repeated string inbounds = 3;
+    string email = 1;
+    Proxy proxies = 2;
+    repeated string inbounds = 3;
 }
 
 message Users {
@@ -210,19 +235,19 @@ message OverrideBalancerTargetRequest {
 
 // Service for node management and connection
 service NodeService {
-  rpc Start(Backend) returns (BaseInfoResponse) {}
-  rpc Stop(Empty) returns (Empty) {}
-  rpc GetBaseInfo(Empty) returns (BaseInfoResponse) {}
+  rpc Start (Backend) returns (BaseInfoResponse) {}
+  rpc Stop (Empty) returns (Empty) {}
+  rpc GetBaseInfo (Empty) returns (BaseInfoResponse) {}
 
-  rpc GetLogs(Empty) returns (stream Log) {}
+  rpc GetLogs (Empty) returns (stream Log) {}
 
-  rpc GetSystemStats(Empty) returns (SystemStatsResponse) {}
-  rpc GetBackendStats(Empty) returns (BackendStatsResponse) {}
+  rpc GetSystemStats (Empty) returns (SystemStatsResponse) {}
+  rpc GetBackendStats (Empty) returns (BackendStatsResponse) {}
 
-  rpc GetStats(StatRequest) returns (StatResponse) {}
-  rpc GetOutboundsLatency(LatencyRequest) returns (LatencyResponse) {}
+  rpc GetStats (StatRequest) returns (StatResponse) {}
+  rpc GetOutboundsLatency (LatencyRequest) returns (LatencyResponse) {}
 
-  rpc GetUserOnlineStats(StatRequest) returns (OnlineStatResponse) {}
+  rpc GetUserOnlineStats (StatRequest) returns (OnlineStatResponse) {}
   rpc GetUserOnlineIpListStats(StatRequest) returns (StatsOnlineIpListResponse) {}
 
   rpc SyncUser(stream User) returns (Empty) {}

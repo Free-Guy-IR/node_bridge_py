@@ -11,6 +11,8 @@ class BackendType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     XRAY: _ClassVar[BackendType]
     WIREGUARD: _ClassVar[BackendType]
+    SING_BOX: _ClassVar[BackendType]
+    OPEN_VPN: _ClassVar[BackendType]
 
 class StatType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -22,6 +24,8 @@ class StatType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     UserStat: _ClassVar[StatType]
 XRAY: BackendType
 WIREGUARD: BackendType
+SING_BOX: BackendType
+OPEN_VPN: BackendType
 Outbounds: StatType
 Outbound: StatType
 Inbounds: StatType
@@ -228,21 +232,41 @@ class Hysteria(_message.Message):
     auth: str
     def __init__(self, auth: _Optional[str] = ...) -> None: ...
 
+class Hysteria2(_message.Message):
+    __slots__ = ("password",)
+    PASSWORD_FIELD_NUMBER: _ClassVar[int]
+    password: str
+    def __init__(self, password: _Optional[str] = ...) -> None: ...
+
+class OpenVpnUser(_message.Message):
+    __slots__ = ("username", "password", "max_concurrent_connections")
+    USERNAME_FIELD_NUMBER: _ClassVar[int]
+    PASSWORD_FIELD_NUMBER: _ClassVar[int]
+    MAX_CONCURRENT_CONNECTIONS_FIELD_NUMBER: _ClassVar[int]
+    username: str
+    password: str
+    max_concurrent_connections: int
+    def __init__(self, username: _Optional[str] = ..., password: _Optional[str] = ..., max_concurrent_connections: _Optional[int] = ...) -> None: ...
+
 class Proxy(_message.Message):
-    __slots__ = ("vmess", "vless", "trojan", "shadowsocks", "wireguard", "hysteria")
+    __slots__ = ("vmess", "vless", "trojan", "shadowsocks", "wireguard", "hysteria", "hysteria2", "open_vpn")
     VMESS_FIELD_NUMBER: _ClassVar[int]
     VLESS_FIELD_NUMBER: _ClassVar[int]
     TROJAN_FIELD_NUMBER: _ClassVar[int]
     SHADOWSOCKS_FIELD_NUMBER: _ClassVar[int]
     WIREGUARD_FIELD_NUMBER: _ClassVar[int]
     HYSTERIA_FIELD_NUMBER: _ClassVar[int]
+    HYSTERIA2_FIELD_NUMBER: _ClassVar[int]
+    OPEN_VPN_FIELD_NUMBER: _ClassVar[int]
     vmess: Vmess
     vless: Vless
     trojan: Trojan
     shadowsocks: Shadowsocks
     wireguard: Wireguard
     hysteria: Hysteria
-    def __init__(self, vmess: _Optional[_Union[Vmess, _Mapping]] = ..., vless: _Optional[_Union[Vless, _Mapping]] = ..., trojan: _Optional[_Union[Trojan, _Mapping]] = ..., shadowsocks: _Optional[_Union[Shadowsocks, _Mapping]] = ..., wireguard: _Optional[_Union[Wireguard, _Mapping]] = ..., hysteria: _Optional[_Union[Hysteria, _Mapping]] = ...) -> None: ...
+    hysteria2: Hysteria2
+    open_vpn: OpenVpnUser
+    def __init__(self, vmess: _Optional[_Union[Vmess, _Mapping]] = ..., vless: _Optional[_Union[Vless, _Mapping]] = ..., trojan: _Optional[_Union[Trojan, _Mapping]] = ..., shadowsocks: _Optional[_Union[Shadowsocks, _Mapping]] = ..., wireguard: _Optional[_Union[Wireguard, _Mapping]] = ..., hysteria: _Optional[_Union[Hysteria, _Mapping]] = ..., hysteria2: _Optional[_Union[Hysteria2, _Mapping]] = ..., open_vpn: _Optional[_Union[OpenVpnUser, _Mapping]] = ...) -> None: ...
 
 class User(_message.Message):
     __slots__ = ("email", "proxies", "inbounds")

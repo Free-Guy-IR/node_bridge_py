@@ -5,6 +5,8 @@ from grpclib.const import Status
 
 from PasarGuardNodeBridge.common.service_pb2 import (
     Hysteria,
+    Hysteria2,
+    OpenVpnUser,
     Proxy,
     Shadowsocks,
     Trojan,
@@ -29,6 +31,10 @@ def create_proxy(
     wireguard_public_key: str | None = None,
     wireguard_peer_ips: list[str] | None = None,
     hysteria_auth: str | None = None,
+    hysteria2_password: str | None = None,
+    openvpn_username: str | None = None,
+    openvpn_password: str | None = None,
+    openvpn_max_concurrent_connections: int | None = None,
 ) -> Proxy:
     if wireguard_peer_ips is None:
         wireguard_peer_ips = []
@@ -40,6 +46,12 @@ def create_proxy(
         shadowsocks=Shadowsocks(password=shadowsocks_password, method=shadowsocks_method),
         wireguard=Wireguard(public_key=wireguard_public_key, peer_ips=wireguard_peer_ips),
         hysteria=Hysteria(auth=hysteria_auth),
+        hysteria2=Hysteria2(password=hysteria2_password),
+        open_vpn=OpenVpnUser(
+            username=openvpn_username,
+            password=openvpn_password,
+            max_concurrent_connections=openvpn_max_concurrent_connections or 0,
+        ),
     )
 
 
