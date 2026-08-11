@@ -258,8 +258,16 @@ class MtprotoUser(_message.Message):
     secret: str
     def __init__(self, username: _Optional[str] = ..., secret: _Optional[str] = ...) -> None: ...
 
+class Tuic(_message.Message):
+    __slots__ = ("uuid", "password")
+    UUID_FIELD_NUMBER: _ClassVar[int]
+    PASSWORD_FIELD_NUMBER: _ClassVar[int]
+    uuid: str
+    password: str
+    def __init__(self, uuid: _Optional[str] = ..., password: _Optional[str] = ...) -> None: ...
+
 class Proxy(_message.Message):
-    __slots__ = ("vmess", "vless", "trojan", "shadowsocks", "wireguard", "hysteria", "hysteria2", "open_vpn", "mtproto")
+    __slots__ = ("vmess", "vless", "trojan", "shadowsocks", "wireguard", "hysteria", "hysteria2", "open_vpn", "mtproto", "tuic")
     VMESS_FIELD_NUMBER: _ClassVar[int]
     VLESS_FIELD_NUMBER: _ClassVar[int]
     TROJAN_FIELD_NUMBER: _ClassVar[int]
@@ -269,6 +277,7 @@ class Proxy(_message.Message):
     HYSTERIA2_FIELD_NUMBER: _ClassVar[int]
     OPEN_VPN_FIELD_NUMBER: _ClassVar[int]
     MTPROTO_FIELD_NUMBER: _ClassVar[int]
+    TUIC_FIELD_NUMBER: _ClassVar[int]
     vmess: Vmess
     vless: Vless
     trojan: Trojan
@@ -278,7 +287,8 @@ class Proxy(_message.Message):
     hysteria2: Hysteria2
     open_vpn: OpenVpnUser
     mtproto: MtprotoUser
-    def __init__(self, vmess: _Optional[_Union[Vmess, _Mapping]] = ..., vless: _Optional[_Union[Vless, _Mapping]] = ..., trojan: _Optional[_Union[Trojan, _Mapping]] = ..., shadowsocks: _Optional[_Union[Shadowsocks, _Mapping]] = ..., wireguard: _Optional[_Union[Wireguard, _Mapping]] = ..., hysteria: _Optional[_Union[Hysteria, _Mapping]] = ..., hysteria2: _Optional[_Union[Hysteria2, _Mapping]] = ..., open_vpn: _Optional[_Union[OpenVpnUser, _Mapping]] = ..., mtproto: _Optional[_Union[MtprotoUser, _Mapping]] = ...) -> None: ...
+    tuic: Tuic
+    def __init__(self, vmess: _Optional[_Union[Vmess, _Mapping]] = ..., vless: _Optional[_Union[Vless, _Mapping]] = ..., trojan: _Optional[_Union[Trojan, _Mapping]] = ..., shadowsocks: _Optional[_Union[Shadowsocks, _Mapping]] = ..., wireguard: _Optional[_Union[Wireguard, _Mapping]] = ..., hysteria: _Optional[_Union[Hysteria, _Mapping]] = ..., hysteria2: _Optional[_Union[Hysteria2, _Mapping]] = ..., open_vpn: _Optional[_Union[OpenVpnUser, _Mapping]] = ..., mtproto: _Optional[_Union[MtprotoUser, _Mapping]] = ..., tuic: _Optional[_Union[Tuic, _Mapping]] = ...) -> None: ...
 
 class User(_message.Message):
     __slots__ = ("email", "proxies", "inbounds")

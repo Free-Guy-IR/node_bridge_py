@@ -171,6 +171,11 @@ message MtprotoUser {
     string secret = 2;
 }
 
+message Tuic {
+    string uuid = 1;
+    string password = 2;
+}
+
 message Proxy {
     Vmess vmess = 1;
     Vless vless = 2;
@@ -181,6 +186,7 @@ message Proxy {
     Hysteria2 hysteria2 = 7;
     OpenVpnUser open_vpn = 8;
     MtprotoUser mtproto = 9;
+    Tuic tuic = 10;
 }
 
 message User {

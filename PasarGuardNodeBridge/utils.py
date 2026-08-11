@@ -11,6 +11,7 @@ from PasarGuardNodeBridge.common.service_pb2 import (
     Proxy,
     Shadowsocks,
     Trojan,
+    Tuic,
     User,
     Vless,
     Vmess,
@@ -38,6 +39,8 @@ def create_proxy(
     openvpn_max_concurrent_connections: int | None = None,
     mtproto_username: str | None = None,
     mtproto_secret: str | None = None,
+    tuic_uuid: str | None = None,
+    tuic_password: str | None = None,
 ) -> Proxy:
     if wireguard_peer_ips is None:
         wireguard_peer_ips = []
@@ -59,6 +62,7 @@ def create_proxy(
             username=mtproto_username,
             secret=mtproto_secret,
         ),
+        tuic=Tuic(uuid=tuic_uuid, password=tuic_password),
     )
 
 
