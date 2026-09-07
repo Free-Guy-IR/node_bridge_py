@@ -4,6 +4,7 @@ from ipaddress import ip_address
 from grpclib.const import Status
 
 from PasarGuardNodeBridge.common.service_pb2 import (
+    L2tpUser,
     Hysteria,
     Hysteria2,
     MtprotoUser,
@@ -41,6 +42,8 @@ def create_proxy(
     mtproto_secret: str | None = None,
     tuic_uuid: str | None = None,
     tuic_password: str | None = None,
+    l2tp_username: str | None = None,
+    l2tp_password: str | None = None,
 ) -> Proxy:
     if wireguard_peer_ips is None:
         wireguard_peer_ips = []
@@ -63,6 +66,7 @@ def create_proxy(
             secret=mtproto_secret,
         ),
         tuic=Tuic(uuid=tuic_uuid, password=tuic_password),
+        l2tp=L2tpUser(username=l2tp_username, password=l2tp_password),
     )
 
 

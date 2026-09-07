@@ -14,6 +14,7 @@ class BackendType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     SING_BOX: _ClassVar[BackendType]
     OPEN_VPN: _ClassVar[BackendType]
     MTPROTO: _ClassVar[BackendType]
+    L2TP: _ClassVar[BackendType]
 
 class StatType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -28,6 +29,7 @@ WIREGUARD: BackendType
 SING_BOX: BackendType
 OPEN_VPN: BackendType
 MTPROTO: BackendType
+L2TP: BackendType
 Outbounds: StatType
 Outbound: StatType
 Inbounds: StatType
@@ -40,14 +42,16 @@ class Empty(_message.Message):
     def __init__(self) -> None: ...
 
 class BaseInfoResponse(_message.Message):
-    __slots__ = ("started", "core_version", "node_version")
+    __slots__ = ("started", "core_version", "node_version", "supported_backends")
     STARTED_FIELD_NUMBER: _ClassVar[int]
     CORE_VERSION_FIELD_NUMBER: _ClassVar[int]
     NODE_VERSION_FIELD_NUMBER: _ClassVar[int]
+    SUPPORTED_BACKENDS_FIELD_NUMBER: _ClassVar[int]
     started: bool
     core_version: str
     node_version: str
-    def __init__(self, started: bool = ..., core_version: _Optional[str] = ..., node_version: _Optional[str] = ...) -> None: ...
+    supported_backends: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, started: bool = ..., core_version: _Optional[str] = ..., node_version: _Optional[str] = ..., supported_backends: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class Backend(_message.Message):
     __slots__ = ("type", "config", "users", "keep_alive", "exclude_inbounds")
@@ -266,8 +270,16 @@ class Tuic(_message.Message):
     password: str
     def __init__(self, uuid: _Optional[str] = ..., password: _Optional[str] = ...) -> None: ...
 
+class L2tpUser(_message.Message):
+    __slots__ = ("username", "password")
+    USERNAME_FIELD_NUMBER: _ClassVar[int]
+    PASSWORD_FIELD_NUMBER: _ClassVar[int]
+    username: str
+    password: str
+    def __init__(self, username: _Optional[str] = ..., password: _Optional[str] = ...) -> None: ...
+
 class Proxy(_message.Message):
-    __slots__ = ("vmess", "vless", "trojan", "shadowsocks", "wireguard", "hysteria", "hysteria2", "open_vpn", "mtproto", "tuic")
+    __slots__ = ("vmess", "vless", "trojan", "shadowsocks", "wireguard", "hysteria", "hysteria2", "open_vpn", "mtproto", "tuic", "l2tp")
     VMESS_FIELD_NUMBER: _ClassVar[int]
     VLESS_FIELD_NUMBER: _ClassVar[int]
     TROJAN_FIELD_NUMBER: _ClassVar[int]
@@ -278,6 +290,7 @@ class Proxy(_message.Message):
     OPEN_VPN_FIELD_NUMBER: _ClassVar[int]
     MTPROTO_FIELD_NUMBER: _ClassVar[int]
     TUIC_FIELD_NUMBER: _ClassVar[int]
+    L2TP_FIELD_NUMBER: _ClassVar[int]
     vmess: Vmess
     vless: Vless
     trojan: Trojan
@@ -288,7 +301,8 @@ class Proxy(_message.Message):
     open_vpn: OpenVpnUser
     mtproto: MtprotoUser
     tuic: Tuic
-    def __init__(self, vmess: _Optional[_Union[Vmess, _Mapping]] = ..., vless: _Optional[_Union[Vless, _Mapping]] = ..., trojan: _Optional[_Union[Trojan, _Mapping]] = ..., shadowsocks: _Optional[_Union[Shadowsocks, _Mapping]] = ..., wireguard: _Optional[_Union[Wireguard, _Mapping]] = ..., hysteria: _Optional[_Union[Hysteria, _Mapping]] = ..., hysteria2: _Optional[_Union[Hysteria2, _Mapping]] = ..., open_vpn: _Optional[_Union[OpenVpnUser, _Mapping]] = ..., mtproto: _Optional[_Union[MtprotoUser, _Mapping]] = ..., tuic: _Optional[_Union[Tuic, _Mapping]] = ...) -> None: ...
+    l2tp: L2tpUser
+    def __init__(self, vmess: _Optional[_Union[Vmess, _Mapping]] = ..., vless: _Optional[_Union[Vless, _Mapping]] = ..., trojan: _Optional[_Union[Trojan, _Mapping]] = ..., shadowsocks: _Optional[_Union[Shadowsocks, _Mapping]] = ..., wireguard: _Optional[_Union[Wireguard, _Mapping]] = ..., hysteria: _Optional[_Union[Hysteria, _Mapping]] = ..., hysteria2: _Optional[_Union[Hysteria2, _Mapping]] = ..., open_vpn: _Optional[_Union[OpenVpnUser, _Mapping]] = ..., mtproto: _Optional[_Union[MtprotoUser, _Mapping]] = ..., tuic: _Optional[_Union[Tuic, _Mapping]] = ..., l2tp: _Optional[_Union[L2tpUser, _Mapping]] = ...) -> None: ...
 
 class User(_message.Message):
     __slots__ = ("email", "proxies", "inbounds")

@@ -11,6 +11,7 @@ message BaseInfoResponse {
   bool started = 1;
   string core_version = 2;
   string node_version = 3;
+  repeated string supported_backends = 4;
 }
 
 enum BackendType {
@@ -19,6 +20,7 @@ enum BackendType {
   SING_BOX = 2;
   OPEN_VPN = 3;
   MTPROTO = 4;
+  L2TP = 5;
 }
 
 message Backend {
@@ -176,6 +178,11 @@ message Tuic {
     string password = 2;
 }
 
+message L2tpUser {
+    string username = 1;
+    string password = 2;
+}
+
 message Proxy {
     Vmess vmess = 1;
     Vless vless = 2;
@@ -187,6 +194,7 @@ message Proxy {
     OpenVpnUser open_vpn = 8;
     MtprotoUser mtproto = 9;
     Tuic tuic = 10;
+    L2tpUser l2tp = 11;
 }
 
 message User {
