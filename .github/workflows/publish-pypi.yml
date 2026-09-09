@@ -2,6 +2,9 @@ name: Publish Python Package to PyPI
 on:
     release:
         types: [created]
+permissions:
+  contents: read
+
 jobs:
     deploy:
         runs-on: ubuntu-latest
