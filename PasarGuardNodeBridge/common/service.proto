@@ -253,6 +253,9 @@ message AddRoutingRuleRequest {
   // non-destructive behavior.
   bool should_reset = 2;
 }
+message RemoveBackendRequest { BackendType type = 1; }
+message BackendList { repeated BackendType types = 1; }
+
 message RemoveRoutingRuleRequest { string rule_tag = 1; }
 message OverrideBalancerTargetRequest {
   string balancer_tag = 1;
@@ -263,6 +266,9 @@ message OverrideBalancerTargetRequest {
 service NodeService {
   rpc Start (Backend) returns (BaseInfoResponse) {}
   rpc Stop (Empty) returns (Empty) {}
+  rpc AddBackend (Backend) returns (Empty) {}
+  rpc RemoveBackend (RemoveBackendRequest) returns (Empty) {}
+  rpc ListBackends (Empty) returns (BackendList) {}
   rpc GetBaseInfo (Empty) returns (BaseInfoResponse) {}
 
   rpc GetLogs (Empty) returns (stream Log) {}

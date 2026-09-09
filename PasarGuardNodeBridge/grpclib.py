@@ -382,6 +382,49 @@ class Node(PasarGuardNode):
             timeout=timeout,
         )
 
+    async def add_backend(
+        self,
+        config: str,
+        backend_type: service.BackendType,
+        users: list[service.User],
+        exclude_inbounds: list[str] = [],
+        timeout: int | None = None,
+    ) -> service.Empty | None:
+        timeout = timeout or self._default_timeout
+        if await self.get_health() is Health.INVALID:
+            raise NodeAPIError(code=-4, detail="Invalid node")
+
+        async with self._node_lock:
+            return await self._handle_grpc_request(
+                method=self._client.AddBackend,
+                request=service.Backend(
+                    type=backend_type,
+                    config=config,
+                    users=users,
+                    exclude_inbounds=exclude_inbounds,
+                ),
+                timeout=timeout,
+            )
+
+    async def remove_backend(
+        self, backend_type: service.BackendType, timeout: int | None = None
+    ) -> service.Empty | None:
+        timeout = timeout or self._default_timeout
+        async with self._node_lock:
+            return await self._handle_grpc_request(
+                method=self._client.RemoveBackend,
+                request=service.RemoveBackendRequest(type=backend_type),
+                timeout=timeout,
+            )
+
+    async def list_backends(self, timeout: int | None = None) -> service.BackendList | None:
+        timeout = timeout or self._default_timeout
+        return await self._handle_grpc_request(
+            method=self._client.ListBackends,
+            request=service.Empty(),
+            timeout=timeout,
+        )
+
     async def add_routing_rule(
         self, rule: str, should_reset: bool = False, timeout: int | None = None
     ) -> service.Empty | None:

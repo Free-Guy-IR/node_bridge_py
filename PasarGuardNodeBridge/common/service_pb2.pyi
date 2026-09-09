@@ -411,6 +411,18 @@ class AddRoutingRuleRequest(_message.Message):
     should_reset: bool
     def __init__(self, rule: _Optional[str] = ..., should_reset: bool = ...) -> None: ...
 
+class RemoveBackendRequest(_message.Message):
+    __slots__ = ("type",)
+    TYPE_FIELD_NUMBER: _ClassVar[int]
+    type: BackendType
+    def __init__(self, type: _Optional[_Union[BackendType, str]] = ...) -> None: ...
+
+class BackendList(_message.Message):
+    __slots__ = ("types",)
+    TYPES_FIELD_NUMBER: _ClassVar[int]
+    types: _containers.RepeatedScalarFieldContainer[BackendType]
+    def __init__(self, types: _Optional[_Iterable[_Union[BackendType, str]]] = ...) -> None: ...
+
 class RemoveRoutingRuleRequest(_message.Message):
     __slots__ = ("rule_tag",)
     RULE_TAG_FIELD_NUMBER: _ClassVar[int]

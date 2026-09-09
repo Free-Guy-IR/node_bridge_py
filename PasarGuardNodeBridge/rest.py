@@ -434,6 +434,54 @@ class Node(PasarGuardNode):
             proto_response_class=service.RouteResult,
         )
 
+    async def add_backend(
+        self,
+        config: str,
+        backend_type: service.BackendType,
+        users: list[service.User],
+        exclude_inbounds: list[str] = [],
+        timeout: int | None = None,
+    ) -> service.Empty | None:
+        timeout = timeout or self._default_timeout
+        if await self.get_health() is Health.INVALID:
+            raise NodeAPIError(code=-4, detail="Invalid node")
+
+        async with self._node_lock:
+            return await self._make_request(
+                method="POST",
+                endpoint="backend",
+                timeout=timeout,
+                proto_message=service.Backend(
+                    type=backend_type,
+                    config=config,
+                    users=users,
+                    exclude_inbounds=exclude_inbounds,
+                ),
+                proto_response_class=service.Empty,
+            )
+
+    async def remove_backend(
+        self, backend_type: service.BackendType, timeout: int | None = None
+    ) -> service.Empty | None:
+        timeout = timeout or self._default_timeout
+        async with self._node_lock:
+            return await self._make_request(
+                method="DELETE",
+                endpoint="backend",
+                timeout=timeout,
+                proto_message=service.RemoveBackendRequest(type=backend_type),
+                proto_response_class=service.Empty,
+            )
+
+    async def list_backends(self, timeout: int | None = None) -> service.BackendList | None:
+        timeout = timeout or self._default_timeout
+        return await self._make_request(
+            method="GET",
+            endpoint="backends",
+            timeout=timeout,
+            proto_response_class=service.BackendList,
+        )
+
     async def add_routing_rule(
         self, rule: str, should_reset: bool = False, timeout: int | None = None
     ) -> service.Empty | None:

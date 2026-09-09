@@ -23,6 +23,18 @@ class NodeServiceBase(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def AddBackend(self, stream: 'grpclib.server.Stream[PasarGuardNodeBridge.common.service_pb2.Backend, PasarGuardNodeBridge.common.service_pb2.Empty]') -> None:
+        pass
+
+    @abc.abstractmethod
+    async def RemoveBackend(self, stream: 'grpclib.server.Stream[PasarGuardNodeBridge.common.service_pb2.RemoveBackendRequest, PasarGuardNodeBridge.common.service_pb2.Empty]') -> None:
+        pass
+
+    @abc.abstractmethod
+    async def ListBackends(self, stream: 'grpclib.server.Stream[PasarGuardNodeBridge.common.service_pb2.Empty, PasarGuardNodeBridge.common.service_pb2.BackendList]') -> None:
+        pass
+
+    @abc.abstractmethod
     async def GetBaseInfo(self, stream: 'grpclib.server.Stream[PasarGuardNodeBridge.common.service_pb2.Empty, PasarGuardNodeBridge.common.service_pb2.BaseInfoResponse]') -> None:
         pass
 
@@ -103,6 +115,24 @@ class NodeServiceBase(abc.ABC):
                 grpclib.const.Cardinality.UNARY_UNARY,
                 PasarGuardNodeBridge.common.service_pb2.Empty,
                 PasarGuardNodeBridge.common.service_pb2.Empty,
+            ),
+            '/service.NodeService/AddBackend': grpclib.const.Handler(
+                self.AddBackend,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                PasarGuardNodeBridge.common.service_pb2.Backend,
+                PasarGuardNodeBridge.common.service_pb2.Empty,
+            ),
+            '/service.NodeService/RemoveBackend': grpclib.const.Handler(
+                self.RemoveBackend,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                PasarGuardNodeBridge.common.service_pb2.RemoveBackendRequest,
+                PasarGuardNodeBridge.common.service_pb2.Empty,
+            ),
+            '/service.NodeService/ListBackends': grpclib.const.Handler(
+                self.ListBackends,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                PasarGuardNodeBridge.common.service_pb2.Empty,
+                PasarGuardNodeBridge.common.service_pb2.BackendList,
             ),
             '/service.NodeService/GetBaseInfo': grpclib.const.Handler(
                 self.GetBaseInfo,
@@ -223,6 +253,24 @@ class NodeServiceStub:
             '/service.NodeService/Stop',
             PasarGuardNodeBridge.common.service_pb2.Empty,
             PasarGuardNodeBridge.common.service_pb2.Empty,
+        )
+        self.AddBackend = grpclib.client.UnaryUnaryMethod(
+            channel,
+            '/service.NodeService/AddBackend',
+            PasarGuardNodeBridge.common.service_pb2.Backend,
+            PasarGuardNodeBridge.common.service_pb2.Empty,
+        )
+        self.RemoveBackend = grpclib.client.UnaryUnaryMethod(
+            channel,
+            '/service.NodeService/RemoveBackend',
+            PasarGuardNodeBridge.common.service_pb2.RemoveBackendRequest,
+            PasarGuardNodeBridge.common.service_pb2.Empty,
+        )
+        self.ListBackends = grpclib.client.UnaryUnaryMethod(
+            channel,
+            '/service.NodeService/ListBackends',
+            PasarGuardNodeBridge.common.service_pb2.Empty,
+            PasarGuardNodeBridge.common.service_pb2.BackendList,
         )
         self.GetBaseInfo = grpclib.client.UnaryUnaryMethod(
             channel,

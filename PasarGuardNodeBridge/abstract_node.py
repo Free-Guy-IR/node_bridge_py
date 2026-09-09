@@ -25,6 +25,27 @@ class PasarGuardNode(Controller, ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def add_backend(
+        self,
+        config: str,
+        backend_type: service.BackendType,
+        users: list[service.User],
+        exclude_inbounds: list[str] = [],
+        timeout: int | None = None,
+    ) -> service.Empty | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def remove_backend(
+        self, backend_type: service.BackendType, timeout: int | None = None
+    ) -> service.Empty | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_backends(self, timeout: int | None = None) -> service.BackendList | None:
+        raise NotImplementedError
+
+    @abstractmethod
     async def info(self, timeout: int | None = None) -> service.BaseInfoResponse | None:
         raise NotImplementedError
 
