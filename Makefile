@@ -26,3 +26,14 @@ install_uv:
 
 format:
 	ruff format .
+
+sync_proto:
+	bash scripts/sync_proto.sh $(REF)
+
+check_proto:
+	PROTO_FRESHNESS=1 bash scripts/check_proto_drift.sh
+
+test:
+	uv run --frozen python -m unittest discover -s tests -v
+
+.PHONY: sync_proto check_proto test

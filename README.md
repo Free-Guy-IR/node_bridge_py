@@ -1,6 +1,6 @@
 # PasarGuard Node Bridge (Python)
 
-> Note: This is the [Free-Guy-IR](https://github.com/Free-Guy-IR) fork of the original [PasarGuard node_bridge_py](https://github.com/PasarGuard/node_bridge_py), extended with sing-box (Hysteria2) and OpenVPN proxy types.
+> Note: This is the [Free-Guy-IR](https://github.com/Free-Guy-IR) fork of the original [PasarGuard node_bridge_py](https://github.com/Free-Guy-IR/node_bridge_py), extended with sing-box (Hysteria2) and OpenVPN proxy types.
 
 Async Python client for connecting to a [PasarGuard node](https://github.com/PasarGuard/node) over `gRPC` or `REST`.
 
@@ -418,3 +418,13 @@ async def main():
 
 asyncio.run(main())
 ```
+
+## Keeping the protobuf definition in sync
+
+`PasarGuardNodeBridge/common/service.proto` is a copy of `common/service.proto` from the `Free-Guy-IR/node` repository; `proto.lock` records the exact node commit it was taken from.
+
+- `make sync_proto` (optionally `REF=<branch|tag|sha>`) fetches the node proto, rewrites `proto.lock` and regenerates the stubs.
+- `make check_proto` fails when the copy differs from the pinned node commit, when the node `main` branch has changed the proto since, or when the checked-in stubs no longer match `protoc` output.
+- The `Proto drift check` workflow runs that check plus the unit tests on every push and pull request, and weekly.
+
+- A **red `freshness` job** (weekly or on demand) means the node repository changed `common/service.proto` after the pinned commit: run `make sync_proto`, review the regenerated stub diff, and commit. After a real proto change, upgrade the consumer with `uv lock --upgrade-package pasarguard-node-bridge` in the panel and rebuild its image.

@@ -1,0 +1,46 @@
+name: Proto drift check
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+    schedule:
+        - cron: "0 3 * * 1"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: proto-drift-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    integrity:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+            - name: Install dependencies
+              run: uv sync --locked --group dev
+            - name: Check the proto against the pinned node commit and the generated stubs
+              run: bash scripts/check_proto_drift.sh
+            - name: Run unit tests
+              run: uv run --frozen python -m unittest discover -s tests -v
+
+    freshness:
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v6
+            - name: Install uv
+              uses: astral-sh/setup-uv@v5
+            - name: Install dependencies
+              run: uv sync --locked --group dev
+            - name: Check the pinned proto against the node repository head
+              env:
+                  PROTO_FRESHNESS: "1"
+              run: bash scripts/check_proto_drift.sh

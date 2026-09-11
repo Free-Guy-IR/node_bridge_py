@@ -213,6 +213,7 @@ message UsersChunk {
   bool last = 3;
 }
 
+// Service for node management and connection
 // Routing (mirrors xray app/router/command, node-friendly shapes)
 message RoutingRule {
   string outbound_tag = 1;
@@ -282,14 +283,13 @@ service NodeService {
   rpc GetUserOnlineStats (StatRequest) returns (OnlineStatResponse) {}
   rpc GetUserOnlineIpListStats(StatRequest) returns (StatsOnlineIpListResponse) {}
 
-  rpc SyncUser(stream User) returns (Empty) {}
-  rpc SyncUsers(Users) returns (Empty) {}
-  rpc SyncUsersChunked(stream UsersChunk) returns (Empty) {}
-
-  rpc ListRoutingRules(Empty) returns (RoutingRulesResponse) {}
-  rpc GetBalancerInfo(BalancerInfoRequest) returns (BalancerInfoResponse) {}
-  rpc TestRoute(TestRouteRequest) returns (RouteResult) {}
-  rpc AddRoutingRule(AddRoutingRuleRequest) returns (Empty) {}
-  rpc RemoveRoutingRule(RemoveRoutingRuleRequest) returns (Empty) {}
-  rpc OverrideBalancerTarget(OverrideBalancerTargetRequest) returns (Empty) {}
+  rpc SyncUser (stream User) returns (Empty) {}
+  rpc SyncUsers (Users) returns (Empty) {}
+  rpc SyncUsersChunked (stream UsersChunk) returns (Empty) {}
+  rpc ListRoutingRules (Empty) returns (RoutingRulesResponse) {}
+  rpc GetBalancerInfo (BalancerInfoRequest) returns (BalancerInfoResponse) {}
+  rpc TestRoute (TestRouteRequest) returns (RouteResult) {}
+  rpc AddRoutingRule (AddRoutingRuleRequest) returns (Empty) {}
+  rpc RemoveRoutingRule (RemoveRoutingRuleRequest) returns (Empty) {}
+  rpc OverrideBalancerTarget (OverrideBalancerTargetRequest) returns (Empty) {}
 }

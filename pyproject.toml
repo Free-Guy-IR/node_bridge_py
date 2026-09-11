@@ -1,8 +1,8 @@
 [project]
 name = "pasarguard-node-bridge"
-version = "0.9.0+singbox"
+version = "0.9.1+singbox"
 description = "python package to connect your project with PasarGuard node go"
-url = "https://github.com/PasarGuard/node_bridge_py"
+url = "https://github.com/Free-Guy-IR/node_bridge_py"
 keywords = [
     "PasarGuard-Node",
     "PasarGuard",
@@ -24,8 +24,8 @@ dependencies = [
 classifiers = ["Programming Language :: Python :: 3.12"]
 
 [project.urls]
-Homepage = "https://github.com/PasarGuard/node_bridge_py"
-Repository = "https://github.com/PasarGuard/node_bridge_py.git"
+Homepage = "https://github.com/Free-Guy-IR/node_bridge_py"
+Repository = "https://github.com/Free-Guy-IR/node_bridge_py.git"
 
 [dependency-groups]
 dev = ["grpcio-tools>=1.80.0"]
