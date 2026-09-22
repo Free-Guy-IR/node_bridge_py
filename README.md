@@ -1,6 +1,6 @@
 # PasarGuard Node Bridge (Python)
 
-> Note: This is the [Free-Guy-IR](https://github.com/Free-Guy-IR) fork of the original [PasarGuard node_bridge_py](https://github.com/Free-Guy-IR/node_bridge_py), extended with sing-box (Hysteria2) and OpenVPN proxy types.
+> Note: This is the [Free-Guy-IR](https://github.com/Free-Guy-IR) fork of the original [PasarGuard node_bridge_py](https://github.com/Free-Guy-IR/node_bridge_py), extended with sing-box, OpenVPN, MTProto and L2TP backends, Hysteria2, OpenVPN, MTProto, TUIC and L2TP user credentials, and several backends on one node (`add_backend`, `remove_backend`, `list_backends`).
 
 Async Python client for connecting to a [PasarGuard node](https://github.com/PasarGuard/node) over `gRPC` or `REST`.
 
@@ -14,8 +14,17 @@ This package provides:
 
 ## Installation
 
+This fork is not published to PyPI; `pip install pasarguard-node-bridge` installs the upstream package, which lacks the fork's backends and RPCs. Install it from git:
+
 ```bash
-pip install pasarguard-node-bridge
+pip install "pasarguard-node-bridge @ git+https://github.com/Free-Guy-IR/node_bridge_py@main"
+```
+
+or, in a uv project:
+
+```toml
+[tool.uv.sources]
+pasarguard-node-bridge = { git = "https://github.com/Free-Guy-IR/node_bridge_py", branch = "main" }
 ```
 
 ## Requirements
@@ -110,7 +119,7 @@ You should `start()` before calling stats/sync/log methods.
 ```python
 await node.start(
     config=config_json_string,
-    backend_type=service.BackendType.XRAY,   # or service.BackendType.WIREGUARD
+    backend_type=service.BackendType.XRAY,   # or WIREGUARD, SING_BOX, OPEN_VPN, MTPROTO, L2TP
     users=[user],                             # optional initial user set
     keep_alive=30,                            # optional
     exclude_inbounds=[],                      # optional
@@ -322,6 +331,9 @@ await node.override_balancer_target("balancer-tag", "outbound-tag")
 - `start(config, backend_type, users, keep_alive=0, exclude_inbounds=[], timeout=None)`
 - `stop(timeout=None)`
 - `info(timeout=None)`
+- `add_backend(config, backend_type, users, exclude_inbounds=[], timeout=None)` starts another backend next to the running ones
+- `remove_backend(backend_type, timeout=None)`
+- `list_backends(timeout=None)`
 
 ### Health/Version
 
