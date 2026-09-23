@@ -119,7 +119,7 @@ You should `start()` before calling stats/sync/log methods.
 ```python
 await node.start(
     config=config_json_string,
-    backend_type=service.BackendType.XRAY,   # or WIREGUARD, SING_BOX, OPEN_VPN, MTPROTO, L2TP
+    backend_type=service.BackendType.XRAY,
     users=[user],                             # optional initial user set
     keep_alive=30,                            # optional
     exclude_inbounds=[],                      # optional
@@ -131,6 +131,8 @@ print(info.node_version, info.core_version)
 
 await node.stop()
 ```
+
+`backend_type` accepts `XRAY`, `WIREGUARD`, `SING_BOX`, `OPEN_VPN`, `MTPROTO` or `L2TP`.
 
 ## Method Examples
 
