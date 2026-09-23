@@ -101,7 +101,7 @@ async def main():
                     # It's a normal log message
                     print(f"LOG: {item}")
 
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     print("No more logs received within timeout")
                     break
 

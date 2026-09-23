@@ -34,6 +34,12 @@ dev = ["grpcio-tools>=1.80.0"]
 line-length = 120
 exclude = ["PasarGuardNodeBridge/common"]
 
+[tool.ruff.lint]
+ignore = [
+    "N999",   # package is named PasarGuardNodeBridge to match the published API/import name
+    "BLE001", # this is a network client library; boundaries must catch arbitrary grpc/aiohttp/ssl errors
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

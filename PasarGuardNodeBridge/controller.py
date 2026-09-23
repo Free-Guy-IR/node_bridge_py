@@ -4,7 +4,6 @@ import math
 import ssl
 from enum import IntEnum
 from json import JSONDecodeError
-from typing import Optional
 from uuid import UUID
 
 import aiohttp
@@ -105,15 +104,15 @@ class Controller:
             self.ctx = self.h2_ctx
 
         except ssl.SSLError as e:
-            raise NodeAPIError(-1, f"SSL initialization failed: {str(e)}")
+            raise NodeAPIError(-1, f"SSL initialization failed: {e!s}")
 
         except (ValueError, TypeError) as e:
-            raise NodeAPIError(-2, f"Invalid API key format: {str(e)}")
+            raise NodeAPIError(-2, f"Invalid API key format: {e!s}")
 
         try:
             self._proxy = parse_proxy_url(proxy)
         except ValueError as e:
-            raise NodeAPIError(-6, f"Invalid proxy format: {str(e)}") from e
+            raise NodeAPIError(-6, f"Invalid proxy format: {e!s}") from e
 
         self._health = Health.NOT_CONNECTED
         self._tasks: list[asyncio.Task] = []
@@ -180,12 +179,11 @@ class Controller:
         """Increment user sync failure counter and check if hard reset is needed."""
         async with self._failure_count_lock:
             self._user_sync_failure_count += 1
-            if self._user_sync_failure_count >= self._hard_reset_threshold:
-                if not self._hard_reset_event.is_set():
-                    self._hard_reset_event.set()
-                    self.logger.critical(
-                        f"[{self.name}] HARD RESET REQUIRED: User sync failed {self._user_sync_failure_count} times in a row"
-                    )
+            if self._user_sync_failure_count >= self._hard_reset_threshold and not self._hard_reset_event.is_set():
+                self._hard_reset_event.set()
+                self.logger.critical(
+                    f"[{self.name}] HARD RESET REQUIRED: User sync failed {self._user_sync_failure_count} times in a row"
+                )
 
     async def _reset_user_sync_failure_count(self):
         """Reset user sync failure counter on successful sync and clear hard reset event."""
@@ -253,7 +251,7 @@ class Controller:
             error_type = type(e).__name__
             self.logger.debug(
                 f"[{self.name}] Sync succeeded but health check failed, keeping {current_health.name} | "
-                f"Error: {error_type} - {str(e)}"
+                f"Error: {error_type} - {e!s}"
             )
             return None, None  # Keep current delays
 
@@ -386,13 +384,12 @@ class Controller:
             await self._cleanup_tasks()
 
         # Set health and versions atomically to prevent race condition
-        async with self._health_lock:
-            async with self._version_lock:
-                self._node_version = node_version
-                self._core_version = core_version
-                if self._health is Health.INVALID:
-                    raise NodeAPIError(code=-4, detail="Invalid node")
-                self._health = Health.HEALTHY
+        async with self._health_lock, self._version_lock:
+            self._node_version = node_version
+            self._core_version = core_version
+            if self._health is Health.INVALID:
+                raise NodeAPIError(code=-4, detail="Invalid node")
+            self._health = Health.HEALTHY
 
         # Create new tasks
         async with self._task_lock:
@@ -435,9 +432,9 @@ class Controller:
                         error_type = type(result).__name__
                         self.logger.error(
                             f"[{self.name}] Task {i} raised exception during cleanup | "
-                            f"Error: {error_type} - {str(result)}"
+                            f"Error: {error_type} - {result!s}"
                         )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self.logger.warning(f"[{self.name}] Timeout waiting for {len(self._tasks)} tasks to cleanup")
 
             self._tasks.clear()
@@ -450,7 +447,7 @@ class Controller:
                 self._sync_worker_task.cancel()
                 try:
                     await asyncio.wait_for(self._sync_worker_task, timeout=2.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
+                except (TimeoutError, asyncio.CancelledError):
                     pass
                 self._sync_worker_task = None
 
@@ -501,7 +498,7 @@ class Controller:
                 # Wait for work or timeout
                 try:
                     await asyncio.wait_for(self._work_available.wait(), timeout=self._worker_idle_timeout)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # No work for idle_timeout seconds, exit worker
                     self.logger.debug(f"[{self.name}] Sync worker idle, exiting")
                     break
@@ -586,7 +583,7 @@ class Controller:
                         error_type = type(e).__name__
                         self.logger.warning(
                             f"[{self.name}] Batch sync failed for {len(users)} user(s), requeuing | "
-                            f"Error: {error_type} - {str(e)}"
+                            f"Error: {error_type} - {e!s}"
                         )
                         await self._increment_user_sync_failure()
                         await self._requeue_claimed_users(claimed_users)
@@ -598,9 +595,7 @@ class Controller:
             self.logger.debug(f"[{self.name}] Sync worker cancelled")
         except Exception as e:
             error_type = type(e).__name__
-            self.logger.error(
-                f"[{self.name}] Unexpected error in sync worker | Error: {error_type} - {str(e)}", exc_info=True
-            )
+            self.logger.exception(f"[{self.name}] Unexpected error in sync worker | Error: {error_type}")
         finally:
             self.logger.debug(f"[{self.name}] Sync worker finished")
 
@@ -608,8 +603,8 @@ class Controller:
         self,
         method: str,
         endpoint: str,
-        timeout: Optional[int] = None,
-        json: Optional[dict] = None,
+        timeout: int | None = None,
+        json: dict | None = None,
     ) -> BufferedResponse:
         """Make an HTTP request to the node's REST API."""
         if timeout is None:
@@ -636,8 +631,8 @@ class Controller:
 
             raise NodeAPIError(code=e.response.status_code, detail=detail) from e
 
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            raise NodeAPIError(code=-5, detail=f"Request error: {str(e)}") from e
+        except (TimeoutError, aiohttp.ClientError) as e:
+            raise NodeAPIError(code=-5, detail=f"Request error: {e!s}") from e
 
     async def check_connectivity(self) -> bool:
         """Check if the node service is reachable via its REST API."""
@@ -645,7 +640,7 @@ class Controller:
             response = await self._make_json_request(method="GET", endpoint="/", timeout=5)
             return response.status_code == 200
         except NodeAPIError as e:
-            self.logger.error(f"[{self.name}] Connectivity check failed: {str(e)}")
+            self.logger.error(f"[{self.name}] Connectivity check failed: {e!s}")
             return False
 
     async def _run_coordinated_update(

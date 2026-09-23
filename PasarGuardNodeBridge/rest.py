@@ -1,7 +1,8 @@
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, TypeVar, overload
+from typing import TypeVar, overload
 
 import aiohttp
 from google.protobuf.message import DecodeError, Message
@@ -165,10 +166,11 @@ class Node(PasarGuardNode):
         backend_type: service.BackendType,
         users: list[service.User],
         keep_alive: int = 0,
-        exclude_inbounds: list[str] = [],
+        exclude_inbounds: list[str] | None = None,
         timeout: int | None = None,
     ) -> service.BaseInfoResponse | None:
         """Start the node with proper task management"""
+        exclude_inbounds = exclude_inbounds or []
         timeout = timeout or self._default_timeout
         health = await self.get_health()
         if health is Health.INVALID:
@@ -226,8 +228,10 @@ class Node(PasarGuardNode):
 
                     try:
                         await self._make_request(method="PUT", endpoint="stop", timeout=timeout)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.debug(
+                            f"[{self.name}] Best-effort stop request failed | Error: {type(e).__name__} - {e!s}"
+                        )
                     await self._release_lifecycle_lease(
                         lease, LifecycleStatus.STOPPED, desired=LifecycleStatus.STOPPED
                     )
@@ -375,7 +379,7 @@ class Node(PasarGuardNode):
             except Exception as e:
                 error_type = type(e).__name__
                 self.logger.warning(
-                    f"[{self.name}] Chunked REST sync failed for {len(users)} user(s) | Error: {error_type} - {str(e)}"
+                    f"[{self.name}] Chunked REST sync failed for {len(users)} user(s) | Error: {error_type} - {e!s}"
                 )
                 return users
 
@@ -536,7 +540,7 @@ class Node(PasarGuardNode):
                 )
             except Exception as e:
                 error_type = type(e).__name__
-                self.logger.warning(f"[{self.name}] Failed to sync user {user.email} | Error: {error_type} - {str(e)}")
+                self.logger.warning(f"[{self.name}] Failed to sync user {user.email} | Error: {error_type} - {e!s}")
                 failed.append(user)
         return failed
 
@@ -570,37 +574,32 @@ class Node(PasarGuardNode):
                         if last_health != Health.BROKEN:
                             self.logger.error(
                                 f"[{self.name}] Health check failed after {max_retries} retries, setting health to BROKEN | "
-                                f"Error: {error_type} - {str(e)}"
+                                f"Error: {error_type} - {e!s}"
                             )
                             await self.set_health(Health.BROKEN)
                     else:
                         self.logger.warning(
                             f"[{self.name}] Health check failed, retry {retries}/{max_retries} in {retry_delay}s | "
-                            f"Error: {error_type} - {str(e)}"
+                            f"Error: {error_type} - {e!s}"
                         )
                         await asyncio.sleep(retry_delay)
                         continue
 
                 try:
                     await asyncio.wait_for(asyncio.sleep(health_check_interval), timeout=health_check_interval + 1)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
 
         except asyncio.CancelledError:
             self.logger.debug(f"[{self.name}] Health check task cancelled")
         except Exception as e:
             error_type = type(e).__name__
-            self.logger.error(
-                f"[{self.name}] Unexpected error in health check task | Error: {error_type} - {str(e)}", exc_info=True
-            )
+            self.logger.exception(f"[{self.name}] Unexpected error in health check task | Error: {error_type}")
             try:
                 await self.set_health(Health.BROKEN)
             except Exception as e_set_health:
                 error_type_set = type(e_set_health).__name__
-                self.logger.error(
-                    f"[{self.name}] Failed to set health to BROKEN | Error: {error_type_set} - {str(e_set_health)}",
-                    exc_info=True,
-                )
+                self.logger.exception(f"[{self.name}] Failed to set health to BROKEN | Error: {error_type_set}")
         finally:
             self.logger.debug(f"[{self.name}] Health check task finished")
 
@@ -670,7 +669,7 @@ class Node(PasarGuardNode):
                 self.logger.debug(f"[{self.name}] Log stream closed: {type(e).__name__}")
             except Exception as e:
                 error_type = type(e).__name__
-                self.logger.error(f"[{self.name}] Error receiving logs | Error: {error_type} - {str(e)}")
+                self.logger.error(f"[{self.name}] Error receiving logs | Error: {error_type} - {e!s}")
                 # Convert exception to NodeAPIError and put directly into log queue
                 # so user gets immediate notification when reading
                 try:
@@ -708,15 +707,17 @@ class Node(PasarGuardNode):
                 if response is not None:
                     try:
                         response.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.debug(
+                            f"[{self.name}] Failed to close HTTP stream | Error: {type(e).__name__} - {e!s}"
+                        )
 
                 # Then cancel and wait for background task to finish
                 if stream_task and not stream_task.done():
                     stream_task.cancel()
                     try:
                         await asyncio.wait_for(stream_task, timeout=1.0)
-                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                    except (TimeoutError, asyncio.CancelledError):
                         pass
 
         except NodeAPIError:
@@ -724,7 +725,7 @@ class Node(PasarGuardNode):
             raise
         except Exception as e:
             error_type = type(e).__name__
-            self.logger.error(f"[{self.name}] Failed to open log stream | Error: {error_type} - {str(e)}")
+            self.logger.error(f"[{self.name}] Failed to open log stream | Error: {error_type} - {e!s}")
             # Convert to NodeAPIError
             self._handle_error(e)
         finally:

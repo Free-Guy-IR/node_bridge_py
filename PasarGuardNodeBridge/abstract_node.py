@@ -3,8 +3,7 @@ from asyncio import Queue
 from contextlib import AbstractAsyncContextManager
 
 from PasarGuardNodeBridge.common import service_pb2 as service
-from PasarGuardNodeBridge.controller import NodeAPIError
-from PasarGuardNodeBridge.controller import Controller
+from PasarGuardNodeBridge.controller import Controller, NodeAPIError
 
 
 class PasarGuardNode(Controller, ABC):
@@ -15,7 +14,7 @@ class PasarGuardNode(Controller, ABC):
         backend_type: service.BackendType,
         users: list[service.User],
         keep_alive: int = 0,
-        exclude_inbounds: list[str] = [],
+        exclude_inbounds: list[str] | None = None,
         timeout: int | None = None,
     ) -> service.BaseInfoResponse | None:
         raise NotImplementedError

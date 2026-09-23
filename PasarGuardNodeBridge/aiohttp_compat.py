@@ -5,7 +5,7 @@ from typing import Any
 import aiohttp
 
 
-def make_timeout(timeout: int | float | None) -> aiohttp.ClientTimeout:
+def make_timeout(timeout: float | None) -> aiohttp.ClientTimeout:
     """Apply the same timeout value across aiohttp's available request phases."""
     if timeout is None:
         return aiohttp.ClientTimeout(total=None)
