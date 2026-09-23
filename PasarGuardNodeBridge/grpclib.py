@@ -35,6 +35,11 @@ class ProxiedChannel(Channel):
         return protocol
 
 
+KEEPALIVE_MIN_NODE_VERSION = "0.6.21"
+KEEPALIVE_TIME = 10.0
+KEEPALIVE_TIMEOUT = 10.0
+
+
 class Node(PasarGuardNode):
     def __init__(
         self,
@@ -74,24 +79,12 @@ class Node(PasarGuardNode):
             if max_message_size is None:
                 max_message_size = 64 * 1024 * 1024  # 64MB
             self._max_message_size = max_message_size
-            channel_class = Channel if self._proxy is None else ProxiedChannel
-            channel_kwargs = {}
-            if self._proxy is not None:
-                if not self._proxy.grpc_supported:
-                    raise NodeAPIError(-7, f"{self._proxy.scheme.upper()} proxies are not supported for gRPC transport")
-                channel_kwargs["proxy_url"] = self._proxy.url
-
-            self.channel = channel_class(
-                host=address,
-                port=port,
-                ssl=self.ctx,
-                config=Configuration(
-                    _keepalive_timeout=10,
-                    http2_connection_window_size=max_message_size,
-                    http2_stream_window_size=max_message_size,
-                ),
-                **channel_kwargs,
-            )
+            if self._proxy is not None and not self._proxy.grpc_supported:
+                raise NodeAPIError(-7, f"{self._proxy.scheme.upper()} proxies are not supported for gRPC transport")
+            self._address = address
+            self._port = port
+            self._keepalive = False
+            self.channel = self._make_channel(keepalive=False)
             self._client = service_grpc.NodeServiceStub(self.channel)
             self._metadata = {"x-api-key": api_key}
         except NodeAPIError:
@@ -100,6 +93,46 @@ class Node(PasarGuardNode):
             raise NodeAPIError(-1, f"Channel initialization failed: {e!s}")
 
         self._node_lock = asyncio.Lock()
+
+    def _make_channel(self, keepalive: bool) -> Channel:
+        channel_class = Channel if self._proxy is None else ProxiedChannel
+        channel_kwargs = {} if self._proxy is None else {"proxy_url": self._proxy.url}
+        keepalive_settings = (
+            {
+                "_keepalive_time": KEEPALIVE_TIME,
+                "_keepalive_timeout": KEEPALIVE_TIMEOUT,
+                "_keepalive_permit_without_calls": True,
+                "_http2_max_pings_without_data": 0,
+                "_http2_min_sent_ping_interval_without_data": KEEPALIVE_TIME,
+            }
+            if keepalive
+            else {"_keepalive_timeout": 10}
+        )
+        return channel_class(
+            host=self._address,
+            port=self._port,
+            ssl=self.ctx,
+            config=Configuration(
+                http2_connection_window_size=self._max_message_size,
+                http2_stream_window_size=self._max_message_size,
+                **keepalive_settings,
+            ),
+            **channel_kwargs,
+        )
+
+    def _use_keepalive(self, node_version: str) -> None:
+        wanted = self._is_version_at_least(node_version, KEEPALIVE_MIN_NODE_VERSION)
+        if wanted == self._keepalive:
+            return
+        retired = self.channel
+        self.channel = self._make_channel(keepalive=wanted)
+        self._client = service_grpc.NodeServiceStub(self.channel)
+        self._keepalive = wanted
+        asyncio.get_running_loop().call_later(self._default_timeout, retired.close)
+
+    async def connect(self, node_version: str, core_version: str, tasks: list | None = None):
+        self._use_keepalive(node_version)
+        await super().connect(node_version, core_version, tasks)
 
     def _close_chan(self):
         """Close gRPC channel"""
