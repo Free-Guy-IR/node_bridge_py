@@ -10,11 +10,19 @@ from google.protobuf.message import DecodeError, Message
 from PasarGuardNodeBridge.abstract_node import PasarGuardNode
 from PasarGuardNodeBridge.aiohttp_compat import BufferedStatusError, LazyClientSession, buffer_response, make_timeout
 from PasarGuardNodeBridge.common import service_pb2 as service
-from PasarGuardNodeBridge.controller import Health, NodeAPIError
+from PasarGuardNodeBridge.controller import Health, NodeAPIError, record_user_sync_failure
 from PasarGuardNodeBridge.storage import LifecycleOperation, LifecycleStatus
 from PasarGuardNodeBridge.utils import format_host_for_url
 
 ProtoMessageT = TypeVar("ProtoMessageT", bound=Message)
+USER_REJECTION_HTTP_STATUS = 500
+
+
+def _user_rejection(error: BaseException) -> str | None:
+    cause = error.__context__ if isinstance(error, NodeAPIError) else error
+    if isinstance(cause, BufferedStatusError) and cause.response.status_code == USER_REJECTION_HTTP_STATUS:
+        return cause.response.text.strip() or "HTTP 500"
+    return None
 
 
 class Node(PasarGuardNode):
@@ -377,6 +385,7 @@ class Node(PasarGuardNode):
                     self._deserialize_protobuf(service.Empty, data)
                     return []
             except Exception as e:
+                record_user_sync_failure(_user_rejection(e))
                 error_type = type(e).__name__
                 self.logger.warning(
                     f"[{self.name}] Chunked REST sync failed for {len(users)} user(s) | Error: {error_type} - {e!s}"
@@ -539,6 +548,7 @@ class Node(PasarGuardNode):
                     proto_response_class=service.Empty,
                 )
             except Exception as e:
+                record_user_sync_failure(_user_rejection(e))
                 error_type = type(e).__name__
                 self.logger.warning(f"[{self.name}] Failed to sync user {user.email} | Error: {error_type} - {e!s}")
                 failed.append(user)

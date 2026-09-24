@@ -4,6 +4,8 @@ import math
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
+from contextvars import ContextVar
+from dataclasses import dataclass
 from enum import IntEnum
 from json import JSONDecodeError
 from uuid import UUID
@@ -44,6 +46,34 @@ class NodeAPIError(Exception):
 
     def __str__(self):
         return f"NodeAPIError(code={self.code}, detail={self.detail})"
+
+
+@dataclass(frozen=True, slots=True)
+class RejectedUser:
+    email: str
+    backend: str
+    reason: str
+
+
+class _SendOutcome:
+    __slots__ = ("rejections", "transport_failures")
+
+    def __init__(self) -> None:
+        self.rejections: list[str] = []
+        self.transport_failures = 0
+
+
+_send_outcome: ContextVar[_SendOutcome | None] = ContextVar("pasarguard_user_send_outcome", default=None)
+
+
+def record_user_sync_failure(rejection: str | None) -> None:
+    outcome = _send_outcome.get()
+    if outcome is None:
+        return
+    if rejection is None:
+        outcome.transport_failures += 1
+    else:
+        outcome.rejections.append(rejection)
 
 
 class Health(IntEnum):
@@ -98,6 +128,11 @@ class Controller:
         self._sync_batch_size = sync_batch_size
         self._sync_chunk_size = sync_chunk_size
         self._user_sync_resolver = user_sync_resolver
+        self._quarantined: dict[str, RejectedUser] = {}
+        self.rejected_users_total = 0
+        self._unconfirmed_rejects = 0
+        self._delivery_ends_at = math.inf
+        self._isolation_deferred = False
         self._claim_generation = 0
         self._recovery_until = 0.0
         self.name = name
@@ -509,7 +544,8 @@ class Controller:
             claimed = await self._user_sync_store.claim_users(
                 self.node_id,
                 self.worker_id,
-                limit=min(limit or self._sync_batch_size, self._sync_batch_size),
+                limit=min(limit or self._sync_batch_size, self._sync_batch_size)
+                + min(self._unconfirmed_rejects, self._sync_batch_size),
                 lease_seconds=self._sync_lease_seconds,
             )
             if claimed:
@@ -565,10 +601,90 @@ class Controller:
             users = [current[user.email] for user in users]
         supports_chunked, _ = await self._supports_chunked_sync()
         if supports_chunked:
-            return await self.sync_users_chunked(
-                users, chunk_size=self._sync_chunk_size, flush_pending=False, timeout=self._internal_timeout
+
+            async def send(batch: list[User]) -> list[User]:
+                return await self.sync_users_chunked(
+                    batch, chunk_size=self._sync_chunk_size, flush_pending=False, timeout=self._internal_timeout
+                )
+
+        else:
+            send = self._sync_batch_users
+        return await self._deliver_isolating_rejects(users, send)
+
+    def quarantined_users(self) -> list[RejectedUser]:
+        return list(self._quarantined.values())
+
+    def _quarantine(self, rejected: list[RejectedUser]) -> None:
+        for item in rejected:
+            self._quarantined[item.email] = item
+            self.rejected_users_total += 1
+            self.logger.error(
+                f"[{self.name}] QUARANTINED user {item.email}: the node rejected it "
+                f"(backend: {item.backend or 'unknown'}) | {item.reason} | every other user in the batch was delivered"
             )
-        return await self._sync_batch_users(users)
+
+    def _release_quarantine(self, users: list[User]) -> None:
+        for user in users:
+            if self._quarantined.pop(user.email, None) is not None:
+                self.logger.info(f"[{self.name}] User {user.email} was accepted by the node and left quarantine")
+
+    async def _send_observed(
+        self, send: Callable[[list[User]], Awaitable[list[User]]], batch: list[User]
+    ) -> tuple[list[User], _SendOutcome]:
+        outcome = _SendOutcome()
+        token = _send_outcome.set(outcome)
+        try:
+            return await send(batch), outcome
+        finally:
+            _send_outcome.reset(token)
+
+    async def _deliver_isolating_rejects(
+        self, users: list[User], send: Callable[[list[User]], Awaitable[list[User]]]
+    ) -> list[User]:
+        loop = asyncio.get_running_loop()
+        pending = [users]
+        failed: list[User] = []
+        delivered: list[User] = []
+        suspects: list[tuple[int, User, str]] = []
+        sends = last_success = 0
+        slowest = 0.0
+        out_of_time = False
+        while pending:
+            batch = pending.pop()
+            if sends and loop.time() + slowest >= self._delivery_ends_at:
+                out_of_time = True
+                pending.append(batch)
+                break
+            started = loop.time()
+            result, outcome = await self._send_observed(send, batch)
+            slowest = max(slowest, loop.time() - started)
+            sends += 1
+            refused = {user.email for user in result}
+            accepted = [user for user in batch if user.email not in refused]
+            if accepted:
+                delivered.extend(accepted)
+                last_success = sends
+            if not result:
+                continue
+            if outcome.transport_failures or not outcome.rejections:
+                failed.extend(result)
+                break
+            if len(result) == 1:
+                suspects.append((sends, result[0], outcome.rejections[-1]))
+                continue
+            middle = len(result) // 2
+            pending.append(result[middle:])
+            pending.append(result[:middle])
+        for batch in pending:
+            failed.extend(batch)
+        confirmed = [RejectedUser(user.email, "", reason) for sent, user, reason in suspects if sent < last_success]
+        unconfirmed = [user for sent, user, _ in suspects if sent >= last_success]
+        failed.extend(unconfirmed)
+        self._unconfirmed_rejects = len(unconfirmed)
+        self._isolation_deferred = out_of_time and bool(delivered or confirmed)
+        self._release_quarantine(delivered)
+        self._quarantine(confirmed)
+        return failed
 
     async def _sync_worker(self):
         """Drain bounded batches, retaining wakes and retrying failures with backoff."""
@@ -596,6 +712,8 @@ class Controller:
                     # Store latency, resolver, transport lock and all stream chunks
                     # share one deadline ending before another worker can own the lease.
                     budget = self._sync_lease_seconds - min(1.0, self._sync_lease_seconds / 4)
+                    self._delivery_ends_at = loop.time() + budget
+                    self._isolation_deferred = False
                     async with asyncio.timeout(budget):
                         claimed = await self._claim_pending_users()
                         if claimed:
@@ -618,7 +736,7 @@ class Controller:
                             [item for item in claimed if item.user.email in failed_emails]
                         )
                     claimed = []
-                    if failed:
+                    if failed and not self._isolation_deferred:
                         await self._increment_user_sync_failure()
                         await asyncio.sleep(retry_delay)
                         retry_delay = min(retry_delay * 2, 30.0)

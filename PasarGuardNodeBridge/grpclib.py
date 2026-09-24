@@ -6,13 +6,14 @@ from contextlib import asynccontextmanager
 
 from grpclib.client import Channel, Stream
 from grpclib.config import Configuration
+from grpclib.const import Status
 from grpclib.exceptions import GRPCError, StreamTerminatedError
 from python_socks.async_.asyncio import Proxy
 
 from PasarGuardNodeBridge.abstract_node import PasarGuardNode
 from PasarGuardNodeBridge.common import service_grpc
 from PasarGuardNodeBridge.common import service_pb2 as service
-from PasarGuardNodeBridge.controller import Health, NodeAPIError
+from PasarGuardNodeBridge.controller import Health, NodeAPIError, record_user_sync_failure
 from PasarGuardNodeBridge.storage import LifecycleOperation, LifecycleStatus
 from PasarGuardNodeBridge.utils import format_host_for_url, grpc_to_http_status
 
@@ -39,6 +40,13 @@ KEEPALIVE_MIN_NODE_VERSION = "0.6.21"
 KEEPALIVE_TIME = 10.0
 KEEPALIVE_TIMEOUT = 10.0
 RETIRED_CHANNEL_GRACE = 600.0
+USER_REJECTION_STATUSES = frozenset({Status.INTERNAL, Status.UNKNOWN})
+
+
+def _user_rejection(error: BaseException) -> str | None:
+    if isinstance(error, GRPCError) and error.status in USER_REJECTION_STATUSES:
+        return error.message or error.status.name
+    return None
 
 
 class Node(PasarGuardNode):
@@ -371,6 +379,7 @@ class Node(PasarGuardNode):
                     await asyncio.wait_for(stream.recv_message(), timeout=timeout)
                     return []
             except Exception as e:
+                record_user_sync_failure(_user_rejection(e))
                 error_type = type(e).__name__
                 self.logger.warning(
                     f"[{self.name}] Chunked gRPC sync failed for {len(users)} user(s) | Error: {error_type} - {e!s}"
@@ -512,6 +521,7 @@ class Node(PasarGuardNode):
                     try:
                         await asyncio.wait_for(stream.send_message(user), timeout=self._internal_timeout)
                     except Exception as e:
+                        record_user_sync_failure(None)
                         error_type = type(e).__name__
                         self.logger.warning(
                             f"[{self.name}] Failed to sync user {user.email} | Error: {error_type} - {e!s}"
@@ -520,6 +530,7 @@ class Node(PasarGuardNode):
                 await asyncio.wait_for(stream.end(), timeout=self._internal_timeout)
         except Exception as e:
             # Stream-level failure - all users failed
+            record_user_sync_failure(_user_rejection(e))
             error_type = type(e).__name__
             self.logger.error(f"[{self.name}] Stream failed | Error: {error_type} - {e!s}")
             return users

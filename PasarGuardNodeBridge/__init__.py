@@ -22,7 +22,7 @@ __author__ = "PasarGuard"
 from enum import Enum
 
 from PasarGuardNodeBridge.abstract_node import PasarGuardNode
-from PasarGuardNodeBridge.controller import Health, NodeAPIError
+from PasarGuardNodeBridge.controller import Health, NodeAPIError, RejectedUser
 from PasarGuardNodeBridge.grpclib import Node as GrpcNode
 from PasarGuardNodeBridge.rest import Node as RestNode
 from PasarGuardNodeBridge.storage import (
@@ -171,6 +171,7 @@ __all__ = [
     "NodeRegistryProtocol",
     "NodeType",
     "PasarGuardNode",
+    "RejectedUser",
     "SnapshotUserSyncStoreProtocol",
     "UserSyncStoreProtocol",
     "create_node",

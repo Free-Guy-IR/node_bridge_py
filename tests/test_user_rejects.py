@@ -288,6 +288,13 @@ class RejectIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(node.quarantined_users(), [])
         self.assertEqual(node._user_sync_failure_count, 0)
 
+    async def test_more_rejected_users_than_one_batch_at_the_head_of_the_queue_do_not_block_the_rest(self):
+        core = FakeNodeCore()
+        node = await self.grpc_node(core, sync_batch_size=4)
+        users = [user(f"bad-{index}", "bad") for index in range(6)] + [user(f"user-{index}") for index in range(10)]
+        await self.drain(node, users)
+        self.assert_isolated(node, core, users, [f"bad-{index}" for index in range(6)])
+
     async def test_isolation_that_outlasts_one_claim_lease_still_makes_progress(self):
         core = FakeNodeCore(delay=0.1)
         node = await self.grpc_node(core, sync_lease_seconds=1.0)
@@ -331,10 +338,13 @@ class RejectIsolationTests(unittest.IsolatedAsyncioTestCase):
                 {email: core.applied.get(email) for email in expected_good}, expected_good, f"round {round_number}"
             )
             self.assertTrue(bad.isdisjoint(email for email, inbounds in core.applied.items() if inbounds == ["bad"]))
-            self.assertEqual(sorted(item.email for item in node.quarantined_users()), sorted(bad), f"round {round_number}")
+            self.assertEqual(
+                sorted(item.email for item in node.quarantined_users()), sorted(bad), f"round {round_number}"
+            )
             self.assertFalse(node.requires_hard_reset())
             cleanup = self.cleanups.pop()
             await cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()
