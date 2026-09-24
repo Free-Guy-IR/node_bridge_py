@@ -38,6 +38,7 @@ class ProxiedChannel(Channel):
 KEEPALIVE_MIN_NODE_VERSION = "0.6.21"
 KEEPALIVE_TIME = 10.0
 KEEPALIVE_TIMEOUT = 10.0
+RETIRED_CHANNEL_GRACE = 600.0
 
 
 class Node(PasarGuardNode):
@@ -128,7 +129,7 @@ class Node(PasarGuardNode):
         self.channel = self._make_channel(keepalive=wanted)
         self._client = service_grpc.NodeServiceStub(self.channel)
         self._keepalive = wanted
-        asyncio.get_running_loop().call_later(self._default_timeout, retired.close)
+        asyncio.get_running_loop().call_later(RETIRED_CHANNEL_GRACE, retired.close)
 
     async def connect(self, node_version: str, core_version: str, tasks: list | None = None):
         self._use_keepalive(node_version)
