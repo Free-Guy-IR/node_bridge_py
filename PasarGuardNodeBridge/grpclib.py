@@ -13,7 +13,14 @@ from python_socks.async_.asyncio import Proxy
 from PasarGuardNodeBridge.abstract_node import PasarGuardNode
 from PasarGuardNodeBridge.common import service_grpc
 from PasarGuardNodeBridge.common import service_pb2 as service
-from PasarGuardNodeBridge.controller import Health, NodeAPIError, record_user_sync_failure
+from PasarGuardNodeBridge.controller import (
+    CAPABILITIES_HEADER,
+    KEEPALIVE_CAPABILITY,
+    Health,
+    NodeAPIError,
+    parse_capabilities,
+    record_user_sync_failure,
+)
 from PasarGuardNodeBridge.storage import LifecycleOperation, LifecycleStatus
 from PasarGuardNodeBridge.utils import format_host_for_url, grpc_to_http_status
 
@@ -36,7 +43,7 @@ class ProxiedChannel(Channel):
         return protocol
 
 
-KEEPALIVE_MIN_NODE_VERSION = "0.6.21"
+CAPABILITY_PROBE_TIMEOUT = 5.0
 KEEPALIVE_TIME = 10.0
 KEEPALIVE_TIMEOUT = 10.0
 RETIRED_CHANNEL_GRACE = 600.0
@@ -129,8 +136,7 @@ class Node(PasarGuardNode):
             **channel_kwargs,
         )
 
-    def _use_keepalive(self, node_version: str) -> None:
-        wanted = self._is_version_at_least(node_version, KEEPALIVE_MIN_NODE_VERSION)
+    def _use_keepalive(self, wanted: bool) -> None:
         if wanted == self._keepalive:
             return
         retired = self.channel
@@ -139,8 +145,26 @@ class Node(PasarGuardNode):
         self._keepalive = wanted
         asyncio.get_running_loop().call_later(RETIRED_CHANNEL_GRACE, retired.close)
 
+    async def _probe_capabilities(self) -> frozenset[str]:
+        try:
+            async with (
+                asyncio.timeout(min(CAPABILITY_PROBE_TIMEOUT, self._internal_timeout)),
+                self._client.GetBaseInfo.open(metadata=self._metadata) as stream,
+            ):
+                await stream.send_message(service.Empty(), end=True)
+                await stream.recv_message()
+                await stream.recv_trailing_metadata()
+                header = stream.initial_metadata.get(CAPABILITIES_HEADER) if stream.initial_metadata else None
+                return parse_capabilities(header)
+        except Exception as e:
+            self.logger.debug(
+                f"[{self.name}] Capability probe failed; assuming none | Error: {type(e).__name__} - {e!s}"
+            )
+            return frozenset()
+
     async def connect(self, node_version: str, core_version: str, tasks: list | None = None):
-        self._use_keepalive(node_version)
+        self._capabilities = await self._probe_capabilities()
+        self._use_keepalive(KEEPALIVE_CAPABILITY in self._capabilities)
         await super().connect(node_version, core_version, tasks)
 
     def _close_chan(self):

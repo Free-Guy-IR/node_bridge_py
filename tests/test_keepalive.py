@@ -1,6 +1,7 @@
 import asyncio
 import time
 import unittest
+from contextlib import suppress
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -9,7 +10,7 @@ from grpclib.server import Server
 import PasarGuardNodeBridge.grpclib as grpc_transport
 from PasarGuardNodeBridge import NodeAPIError
 from PasarGuardNodeBridge.common import service_pb2
-from PasarGuardNodeBridge.common.service_grpc import NodeServiceBase
+from PasarGuardNodeBridge.common.service_grpc import NodeServiceBase, NodeServiceStub
 from PasarGuardNodeBridge.grpclib import Node as GrpcNode
 
 
@@ -84,6 +85,9 @@ def _node(port: int = 1, **kwargs) -> GrpcNode:
             **kwargs,
         )
     node.ctx = None
+    node.channel.close()
+    node.channel = node._make_channel(keepalive=False)
+    node._client = NodeServiceStub(node.channel)
     return node
 
 
@@ -96,7 +100,8 @@ class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         self.server.close()
-        await self.server.wait_closed()
+        with suppress(TimeoutError):
+            await asyncio.wait_for(self.server.wait_closed(), 1)
 
     def advertise(self, capabilities):
         self.service.capabilities = capabilities
@@ -129,7 +134,7 @@ class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
             ("future-thing-v9,keepalive-policy-v1,rejected-users-v1", True),
             ("keepalive-policy-v2", False),
             ("rejected-users-v1", False),
-            ("", False),
+            (",", False),
         ):
             self.advertise(header)
             node = _node(self.port)

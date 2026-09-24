@@ -48,6 +48,18 @@ class NodeAPIError(Exception):
         return f"NodeAPIError(code={self.code}, detail={self.detail})"
 
 
+CAPABILITIES_HEADER = "pg-capabilities"
+KEEPALIVE_CAPABILITY = "keepalive-policy-v1"
+
+
+def parse_capabilities(value: str | bytes | None) -> frozenset[str]:
+    if isinstance(value, bytes):
+        value = value.decode("ascii", errors="replace")
+    if not value:
+        return frozenset()
+    return frozenset(token.strip() for token in value.split(",") if token.strip())
+
+
 @dataclass(frozen=True, slots=True)
 class RejectedUser:
     email: str
@@ -128,6 +140,7 @@ class Controller:
         self._sync_batch_size = sync_batch_size
         self._sync_chunk_size = sync_chunk_size
         self._user_sync_resolver = user_sync_resolver
+        self._capabilities: frozenset[str] = frozenset()
         self._quarantined: dict[str, RejectedUser] = {}
         self.rejected_users_total = 0
         self._unconfirmed_rejects = 0
