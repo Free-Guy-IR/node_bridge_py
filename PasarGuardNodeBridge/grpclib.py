@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -17,7 +18,62 @@ from PasarGuardNodeBridge.storage import LifecycleOperation, LifecycleStatus
 from PasarGuardNodeBridge.utils import format_host_for_url, grpc_to_http_status
 
 
-class ProxiedChannel(Channel):
+class _CountedStream:
+    def __init__(self, channel: "RetirableChannel", stream: Stream):
+        self._channel = channel
+        self._stream = stream
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+    async def __aenter__(self):
+        self._channel._call_opened()
+        try:
+            return await self._stream.__aenter__()
+        except BaseException:
+            self._channel._call_closed()
+            raise
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return await self._stream.__aexit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._channel._call_closed()
+
+
+class RetirableChannel(Channel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._open_calls = 0
+        self._retired = False
+        self._grace_timer: asyncio.TimerHandle | None = None
+
+    def request(self, *args, **kwargs):
+        return _CountedStream(self, super().request(*args, **kwargs))
+
+    def retire(self, grace: float) -> None:
+        self._retired = True
+        self._grace_timer = asyncio.get_running_loop().call_later(grace, self.close)
+        if not self._open_calls:
+            self.close()
+
+    def close(self) -> None:
+        self._retired = True
+        if self._grace_timer is not None:
+            self._grace_timer.cancel()
+            self._grace_timer = None
+        super().close()
+
+    def _call_opened(self) -> None:
+        self._open_calls += 1
+
+    def _call_closed(self) -> None:
+        self._open_calls -= 1
+        if self._retired and not self._open_calls:
+            self.close()
+
+
+class ProxiedChannel(RetirableChannel):
     def __init__(self, *args, proxy_url: str, **kwargs):
         super().__init__(*args, **kwargs)
         self._proxy_url = proxy_url
@@ -68,6 +124,7 @@ class Node(PasarGuardNode):
         proxy: str | None = None,
         **kwargs,
     ):
+        self._retired_channels: weakref.WeakSet[RetirableChannel] = weakref.WeakSet()
         host_for_url = format_host_for_url(address)
         service_url = f"https://{host_for_url}:{api_port}/"
         super().__init__(
@@ -106,8 +163,8 @@ class Node(PasarGuardNode):
 
         self._node_lock = asyncio.Lock()
 
-    def _make_channel(self, keepalive: bool) -> Channel:
-        channel_class = Channel if self._proxy is None else ProxiedChannel
+    def _make_channel(self, keepalive: bool) -> RetirableChannel:
+        channel_class = RetirableChannel if self._proxy is None else ProxiedChannel
         channel_kwargs = {} if self._proxy is None else {"proxy_url": self._proxy.url}
         keepalive_settings = (
             {
@@ -139,7 +196,8 @@ class Node(PasarGuardNode):
         self.channel = self._make_channel(keepalive=wanted)
         self._client = service_grpc.NodeServiceStub(self.channel)
         self._keepalive = wanted
-        asyncio.get_running_loop().call_later(RETIRED_CHANNEL_GRACE, retired.close)
+        self._retired_channels.add(retired)
+        retired.retire(RETIRED_CHANNEL_GRACE)
 
     async def _probe_capabilities(self) -> frozenset[str]:
         try:
@@ -165,9 +223,12 @@ class Node(PasarGuardNode):
 
     def _close_chan(self):
         """Close gRPC channel"""
+        channels = list(getattr(self, "_retired_channels", ()))
         if hasattr(self, "channel"):
+            channels.append(self.channel)
+        for channel in channels:
             try:
-                self.channel.close()
+                channel.close()
             except Exception as e:
                 self.logger.debug(f"[{self.name}] Failed to close gRPC channel | Error: {type(e).__name__} - {e!s}")
 
