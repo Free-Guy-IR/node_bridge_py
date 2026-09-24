@@ -111,6 +111,19 @@ class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(node.channel._config._keepalive_time)
         node._close_chan()
 
+    async def test_a_rotated_channel_stays_open_long_enough_for_calls_already_on_it(self):
+        node = _node()
+        retired = node.channel
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, "call_later") as scheduled:
+            await node.connect("0.6.21", "26.3.27")
+        delay, callback = scheduled.call_args.args
+        self.assertIs(callback.__self__, retired)
+        self.assertGreaterEqual(delay, grpc_transport.RETIRED_CHANNEL_GRACE)
+        self.assertGreater(grpc_transport.RETIRED_CHANNEL_GRACE, node._default_timeout + node._internal_timeout * 20)
+        retired.close()
+        node._close_chan()
+
     async def test_a_node_that_reconnects_after_an_upgrade_starts_getting_pings(self):
         node = _node()
         await node.connect("0.6.20", "26.3.27")
