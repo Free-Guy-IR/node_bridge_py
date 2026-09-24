@@ -18,14 +18,24 @@ async def _backend_stats(self, stream):
     await stream.send_message(service_pb2.BackendStatsResponse())
 
 
+async def _base_info(self, stream):
+    await stream.recv_message()
+    if self.capabilities is not None:
+        await stream.send_initial_metadata(metadata={"pg-capabilities": self.capabilities})
+    await stream.send_message(service_pb2.BaseInfoResponse(started=True, node_version="0.6.21"))
+
+
 async def _unused(self, stream):
     return None
 
 
-def _service():
+def _service(capabilities=None):
     methods = {name: _unused for name in NodeServiceBase.__abstractmethods__}
     methods["GetBackendStats"] = _backend_stats
-    return type("KeepaliveNodeService", (NodeServiceBase,), methods)()
+    methods["GetBaseInfo"] = _base_info
+    service = type("KeepaliveNodeService", (NodeServiceBase,), methods)()
+    service.capabilities = capabilities
+    return service
 
 
 class SilentProxy:
@@ -78,41 +88,64 @@ def _node(port: int = 1, **kwargs) -> GrpcNode:
 
 
 class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.service = _service()
+        self.server = Server([self.service])
+        await self.server.start("127.0.0.1", 0)
+        self.port = self.server._server.sockets[0].getsockname()[1]
+
     async def asyncTearDown(self):
-        await asyncio.sleep(0)
+        self.server.close()
+        await self.server.wait_closed()
 
-    async def test_a_node_older_than_the_ping_policy_gets_no_pings(self):
-        node = _node()
-        await node.connect("0.6.20", "26.3.27")
-        self.assertIsNone(node.channel._config._keepalive_time)
-        node._close_chan()
+    def advertise(self, capabilities):
+        self.service.capabilities = capabilities
 
-    async def test_a_node_with_the_ping_policy_gets_pings(self):
-        node = _node()
+    def pings(self, node):
+        return node.channel._config._keepalive_time is not None
+
+    async def test_a_node_that_reports_the_policy_version_but_does_not_advertise_it_gets_no_pings(self):
+        node = _node(self.port)
         await node.connect("0.6.21", "26.3.27")
-        config = node.channel._config
-        self.assertEqual(config._keepalive_time, grpc_transport.KEEPALIVE_TIME)
-        self.assertGreaterEqual(config._keepalive_time, 5)
-        self.assertTrue(config._keepalive_permit_without_calls)
-        self.assertEqual(config._http2_max_pings_without_data, 0)
-        self.assertGreaterEqual(config._http2_min_sent_ping_interval_without_data, 5)
+        self.assertFalse(self.pings(node))
         node._close_chan()
 
-    async def test_versions_with_suffixes_are_tolerated(self):
-        for version, expected in (("0.6.21+build.7", True), ("0.6.22-rc1", True), ("0.6.20+build.9", False)):
-            node = _node()
+    async def test_a_node_that_advertises_the_ping_policy_gets_pings_whatever_its_version(self):
+        self.advertise("keepalive-policy-v1")
+        for version in ("0.6.20", "0.6.22", "dev-build"):
+            node = _node(self.port)
             await node.connect(version, "26.3.27")
-            self.assertEqual(node.channel._config._keepalive_time is not None, expected, version)
+            config = node.channel._config
+            self.assertEqual(config._keepalive_time, grpc_transport.KEEPALIVE_TIME, version)
+            self.assertGreaterEqual(config._keepalive_time, 5)
+            self.assertTrue(config._keepalive_permit_without_calls)
+            self.assertEqual(config._http2_max_pings_without_data, 0)
+            self.assertGreaterEqual(config._http2_min_sent_ping_interval_without_data, 5)
             node._close_chan()
 
-    async def test_an_unparseable_version_gets_no_pings(self):
-        node = _node()
-        await node.connect("dev-build", "26.3.27")
-        self.assertIsNone(node.channel._config._keepalive_time)
+    async def test_the_capability_is_found_among_other_and_unknown_tokens(self):
+        for header, expected in (
+            ("rejected-users-v1,keepalive-policy-v1", True),
+            ("future-thing-v9,keepalive-policy-v1,rejected-users-v1", True),
+            ("keepalive-policy-v2", False),
+            ("rejected-users-v1", False),
+            ("", False),
+        ):
+            self.advertise(header)
+            node = _node(self.port)
+            await node.connect("0.6.21", "26.3.27")
+            self.assertEqual(self.pings(node), expected, header)
+            node._close_chan()
+
+    async def test_a_node_that_cannot_be_probed_gets_no_pings(self):
+        node = _node(1)
+        await node.connect("0.6.21", "26.3.27")
+        self.assertFalse(self.pings(node))
         node._close_chan()
 
     async def test_a_rotated_channel_stays_open_long_enough_for_calls_already_on_it(self):
-        node = _node()
+        self.advertise("keepalive-policy-v1")
+        node = _node(self.port)
         retired = node.channel
         loop = asyncio.get_running_loop()
         with patch.object(loop, "call_later") as scheduled:
@@ -125,23 +158,28 @@ class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
         node._close_chan()
 
     async def test_a_node_that_reconnects_after_an_upgrade_starts_getting_pings(self):
-        node = _node()
-        await node.connect("0.6.20", "26.3.27")
-        self.assertIsNone(node.channel._config._keepalive_time)
+        node = _node(self.port)
         await node.connect("0.6.21", "26.3.27")
-        self.assertIsNotNone(node.channel._config._keepalive_time)
-        await node.connect("0.6.20", "26.3.27")
-        self.assertIsNone(node.channel._config._keepalive_time)
+        self.assertFalse(self.pings(node))
+        self.advertise("keepalive-policy-v1")
+        await node.connect("0.6.22", "26.3.27")
+        self.assertTrue(self.pings(node))
+        self.advertise(None)
+        await node.connect("0.6.21", "26.3.27")
+        self.assertFalse(self.pings(node))
         node._close_chan()
 
 
 class SilentPeerTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_node_whose_network_goes_silent_is_detected_before_the_rpc_timeout(self):
-        server = Server([_service()])
+        server = Server([_service("keepalive-policy-v1")])
         await server.start("127.0.0.1", 0)
         proxy = SilentProxy(server._server.sockets[0].getsockname()[1])
         port = await proxy.start()
-        with patch.object(grpc_transport, "KEEPALIVE_TIME", 0.3), patch.object(grpc_transport, "KEEPALIVE_TIMEOUT", 0.5):
+        with (
+            patch.object(grpc_transport, "KEEPALIVE_TIME", 0.3),
+            patch.object(grpc_transport, "KEEPALIVE_TIMEOUT", 0.5),
+        ):
             node = _node(port, default_timeout=5, internal_timeout=5)
             try:
                 await node.connect("0.6.21", "26.3.27")
