@@ -1,7 +1,6 @@
 import asyncio
 import time
 import unittest
-from contextlib import suppress
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -100,8 +99,7 @@ class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         self.server.close()
-        with suppress(TimeoutError):
-            await asyncio.wait_for(self.server.wait_closed(), 1)
+        await asyncio.wait_for(self.server.wait_closed(), 5)
 
     def advertise(self, capabilities):
         self.service.capabilities = capabilities
