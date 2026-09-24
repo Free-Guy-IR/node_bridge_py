@@ -42,16 +42,22 @@ class Empty(_message.Message):
     def __init__(self) -> None: ...
 
 class BaseInfoResponse(_message.Message):
-    __slots__ = ("started", "core_version", "node_version", "supported_backends")
+    __slots__ = ("started", "core_version", "node_version", "supported_backends", "filter_rules_stripped", "filter_strip_reason", "stripped_rule_tags")
     STARTED_FIELD_NUMBER: _ClassVar[int]
     CORE_VERSION_FIELD_NUMBER: _ClassVar[int]
     NODE_VERSION_FIELD_NUMBER: _ClassVar[int]
     SUPPORTED_BACKENDS_FIELD_NUMBER: _ClassVar[int]
+    FILTER_RULES_STRIPPED_FIELD_NUMBER: _ClassVar[int]
+    FILTER_STRIP_REASON_FIELD_NUMBER: _ClassVar[int]
+    STRIPPED_RULE_TAGS_FIELD_NUMBER: _ClassVar[int]
     started: bool
     core_version: str
     node_version: str
     supported_backends: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, started: bool = ..., core_version: _Optional[str] = ..., node_version: _Optional[str] = ..., supported_backends: _Optional[_Iterable[str]] = ...) -> None: ...
+    filter_rules_stripped: bool
+    filter_strip_reason: str
+    stripped_rule_tags: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, started: bool = ..., core_version: _Optional[str] = ..., node_version: _Optional[str] = ..., supported_backends: _Optional[_Iterable[str]] = ..., filter_rules_stripped: bool = ..., filter_strip_reason: _Optional[str] = ..., stripped_rule_tags: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class Backend(_message.Message):
     __slots__ = ("type", "config", "users", "keep_alive", "exclude_inbounds")

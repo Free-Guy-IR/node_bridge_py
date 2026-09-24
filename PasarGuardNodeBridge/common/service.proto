@@ -12,6 +12,9 @@ message BaseInfoResponse {
   string core_version = 2;
   string node_version = 3;
   repeated string supported_backends = 4;
+  bool filter_rules_stripped = 5;
+  string filter_strip_reason = 6;
+  repeated string stripped_rule_tags = 7;
 }
 
 enum BackendType {
