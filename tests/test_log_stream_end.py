@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from aiohttp import web
-from grpclib.client import Stream
+from grpclib.client import Channel, Stream
 from grpclib.const import Cardinality, Handler, Status
 from grpclib.exceptions import GRPCError
 from grpclib.server import Server
@@ -108,14 +108,13 @@ class LogStreamEndTests(unittest.IsolatedAsyncioTestCase):
         port = await relay.start()
         self.relay = relay
         node = self.make_node(GrpcNode, port)
-        node.ctx = None
         node.channel.close()
-        node.channel = node._make_channel(keepalive=False)
+        node.channel = Channel("127.0.0.1", port, ssl=False)
         node._client = service_grpc.NodeServiceStub(node.channel)
 
         async def cleanup():
             source.hold.set()
-            node._close_chan()
+            node.channel.close()
             await node._json_client.close()
             relay.close()
             server.close()
