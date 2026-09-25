@@ -78,6 +78,16 @@ class _SendOutcome:
 _send_outcome: ContextVar[_SendOutcome | None] = ContextVar("pasarguard_user_send_outcome", default=None)
 
 
+def deliver_stream_error(queue: asyncio.Queue, error: "NodeAPIError") -> None:
+    while True:
+        try:
+            queue.put_nowait(error)
+            return
+        except asyncio.QueueFull:
+            with suppress(asyncio.QueueEmpty):
+                queue.get_nowait()
+
+
 def record_user_sync_failure(rejection: str | None) -> None:
     outcome = _send_outcome.get()
     if outcome is None:

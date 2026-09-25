@@ -1,9 +1,11 @@
 import asyncio
+import contextlib
 import logging
 import unittest
 from unittest.mock import patch
 
 from aiohttp import web
+from grpclib.client import Stream
 from grpclib.const import Cardinality, Handler, Status
 from grpclib.exceptions import GRPCError
 from grpclib.server import Server
@@ -47,6 +49,36 @@ class GrpcLogNode:
         }
 
 
+class DroppingRelay:
+    def __init__(self, upstream_port):
+        self.upstream_port = upstream_port
+        self.writers = []
+        self.server = None
+
+    async def _pump(self, reader, writer):
+        with contextlib.suppress(Exception):
+            while data := await reader.read(65536):
+                writer.write(data)
+                await writer.drain()
+
+    async def _handle(self, client_reader, client_writer):
+        upstream_reader, upstream_writer = await asyncio.open_connection("127.0.0.1", self.upstream_port)
+        self.writers += [client_writer, upstream_writer]
+        await asyncio.gather(self._pump(client_reader, upstream_writer), self._pump(upstream_reader, client_writer))
+
+    async def start(self):
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        return self.server.sockets[0].getsockname()[1]
+
+    def drop(self):
+        for writer in self.writers:
+            writer.close()
+
+    def close(self):
+        self.drop()
+        self.server.close()
+
+
 class LogStreamEndTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cleanups = []
@@ -72,18 +104,20 @@ class LogStreamEndTests(unittest.IsolatedAsyncioTestCase):
     async def grpc_node(self, source):
         server = Server([GrpcLogNode(source)])
         await server.start("127.0.0.1", 0)
-        port = server._server.sockets[0].getsockname()[1]
+        relay = DroppingRelay(server._server.sockets[0].getsockname()[1])
+        port = await relay.start()
+        self.relay = relay
         node = self.make_node(GrpcNode, port)
         node.ctx = None
         node.channel.close()
         node.channel = node._make_channel(keepalive=False)
         node._client = service_grpc.NodeServiceStub(node.channel)
-        self.server = server
 
         async def cleanup():
             source.hold.set()
             node._close_chan()
             await node._json_client.close()
+            relay.close()
             server.close()
             await asyncio.wait_for(server.wait_closed(), 5)
 
@@ -162,7 +196,7 @@ class LogStreamEndTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs(LOGGER, level="WARNING") as logs:
             async with node.stream_logs() as queue:
                 self.assertEqual(await asyncio.wait_for(queue.get(), 5), "one")
-                self.server.close()
+                self.relay.drop()
                 items = await self.read_until_error(queue)
         self.assertIsInstance(items[-1], NodeAPIError)
         self.assertTrue(any("log stream" in line.lower() for line in logs.output), logs.output)
@@ -214,6 +248,22 @@ class LogStreamEndTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(await asyncio.wait_for(queue.get(), 5), "one")
                     await asyncio.sleep(0.2)
                 self.assertTrue(queue.empty())
+
+    async def test_leaving_stays_silent_even_when_the_cancel_lets_the_reader_run_first(self):
+        source = LogSource()
+        source.lines = ["one"]
+        source.ending = "hold"
+        node = await self.grpc_node(source)
+        original = Stream.cancel
+
+        async def slow_cancel(stream):
+            await original(stream)
+            await asyncio.sleep(0.2)
+
+        with patch.object(Stream, "cancel", slow_cancel), self.assertNoLogs(LOGGER, level="WARNING"):
+            async with node.stream_logs() as queue:
+                self.assertEqual(await asyncio.wait_for(queue.get(), 5), "one")
+        self.assertTrue(queue.empty())
 
 
 if __name__ == "__main__":
