@@ -41,6 +41,7 @@ class FakeNodeCore:
         self.accepted_at = {}
         self.batches = []
         self.on_send = None
+        self.reject_all = False
 
     def accept(self, item):
         self.applied[item.email] = list(item.inbounds)
@@ -54,6 +55,8 @@ class FakeNodeCore:
         delay = self.slow_sends.get(len(self.batches), self.delay)
         if delay:
             await asyncio.sleep(delay)
+        if self.reject_all:
+            return Status.INTERNAL, "failed to update users: core api unreachable"
         bad = [item.email for item in users if is_bad(item)]
         if bad:
             return Status.INTERNAL, f"failed to update users: invalid account {bad[0]}"
