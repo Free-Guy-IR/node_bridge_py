@@ -1,7 +1,9 @@
 import asyncio
+import itertools
 import logging
 import math
 import ssl
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -86,11 +88,13 @@ class _Delivery(list):
     sent one by one if ``deferred_alone`` (the round found as many rejected users as accepted ones).
     """
 
-    def __init__(self, failed=(), isolated=(), deferred=(), deferred_alone=False):
+    def __init__(self, failed=(), isolated=(), deferred=(), deferred_alone=False, groups=None, resolved=True):
         super().__init__(failed)
         self.isolated = list(isolated)
         self.deferred = list(deferred)
         self.deferred_alone = deferred_alone
+        self.groups = dict(groups or {})
+        self.resolved = resolved
 
 
 @dataclass(slots=True)
@@ -111,6 +115,18 @@ class _RejectedUser:
     queued_at: float | None = None
     reported: bool = False
     alone: bool = False
+    group: int | None = None
+
+
+class _SendTimes:
+    def __init__(self, size: int = 8):
+        self._recent: deque[float] = deque(maxlen=size)
+
+    def record(self, seconds: float) -> None:
+        self._recent.append(seconds)
+
+    def estimate(self) -> float:
+        return max(self._recent, default=0.0)
 
 
 class FullSyncHold:
@@ -237,6 +253,9 @@ class Controller:
         # end of the current round, so isolation leaves the rest for the next round instead of overrunning.
         self._sync_isolation_calls = 16
         self._sync_round_end = math.inf
+        self._sync_send_times = _SendTimes()
+        self._sync_group_ids = itertools.count()
+        self._sync_fresh_last = False
 
         # Separate locks for different resources to reduce contention
         self._health_lock = asyncio.Lock()
@@ -702,45 +721,80 @@ class Controller:
         retry: list[User] = []
         isolated: list[tuple[User, str]] = []
         deferred: list[tuple[User, str]] = []
+        groups: dict[str, tuple[int, bool]] = {}
         loop = asyncio.get_running_loop()
         # A send may take up to the internal timeout: none starts that could outlast the round.
         stop_at = self._sync_round_end - self._internal_timeout
+        deadline = self._sync_round_end - min(0.5, self._sync_lease_seconds / 16)
+        carried: dict[int, tuple[list[User], bool]] = {}
+        for user in users:
+            entry = self._sync_retries.get(user.email)
+            if entry is not None and not entry.attempts and entry.group is not None:
+                carried.setdefault(entry.group, ([], entry.alone))[0].append(user)
+        grouped = {user.email for batch, _ in carried.values() for user in batch}
         # Users the node rejected before go in their own batch, so a repeat rejection does not split the rest.
-        held = [user for user in users if self._send_alone(user)]
+        held = [user for user in users if user.email not in grouped and self._send_alone(user)]
         held.sort(key=lambda user: self._sync_retries[user.email].attempts > 0)
-        rest = [user for user in users if not self._send_alone(user)]
+        rest = [user for user in users if user.email not in grouped and not self._send_alone(user)]
         # (batch, alone): alone sends the users of a rejected batch one by one instead of splitting it.
-        batches = [(batch, alone) for batch, alone in ((held, True), (rest, False)) if batch]
-        sends, resolved, accepted, detail = 0, False, 0, ""
+        waiting = [(held, True, False, False)] if held else []
+        waiting += [(batch, alone, True, False) for _, (batch, alone) in sorted(carried.items())]
+        fresh = [(rest, False, False, True)] if rest else []
+        batches = fresh + waiting if self._sync_fresh_last else waiting + fresh
+        sends, resolved, accepted, detail, waiting_sent = 0, False, 0, "", False
         while batches:
-            if resolved and (sends >= self._sync_isolation_calls or loop.time() >= stop_at):
-                deferred += [(user, detail) for batch, _ in batches for user in batch]
+            now = loop.time()
+            if (sends and now + self._sync_send_times.estimate() >= deadline) or (
+                resolved and (sends >= self._sync_isolation_calls or now >= stop_at)
+            ):
                 break
-            batch, alone = batches.pop()
+            batch, alone, part, from_fresh = batches.pop()
             sends += 1
-            failed = await self.sync_users_chunked(
-                batch, chunk_size=self._sync_chunk_size, flush_pending=False, timeout=self._internal_timeout
-            )
+            waiting_sent = waiting_sent or not from_fresh
+            started = loop.time()
+            try:
+                async with asyncio.timeout_at(deadline if sends > 1 and not math.isinf(deadline) else None) as cutoff:
+                    failed = await self.sync_users_chunked(
+                        batch, chunk_size=self._sync_chunk_size, flush_pending=False, timeout=self._internal_timeout
+                    )
+            except TimeoutError:
+                if not cutoff.expired():
+                    raise
+                self._sync_send_times.record(loop.time() - started)
+                batches.append((batch, alone, part, from_fresh))
+                break
+            self._sync_send_times.record(loop.time() - started)
             if not failed:
                 resolved = True
                 accepted += len(batch)
                 continue
             if not getattr(failed, "rejected", False):
                 retry += failed
-                for remaining, _ in batches:
+                for remaining, *_ in batches:
                     retry += remaining
+                batches = []
                 break
             detail = failed.detail
             if len(batch) == 1:
                 resolved = True
                 isolated.append((batch[0], failed.detail))
             elif alone:
-                batches += [([user], True) for user in reversed(batch)]
+                batches += [([user], True, True, from_fresh) for user in reversed(batch)]
             else:
                 middle = len(batch) // 2
-                batches += [(batch[middle:], False), (batch[:middle], False)]
+                batches += [(batch[middle:], False, True, from_fresh), (batch[:middle], False, True, from_fresh)]
         # Where most users are rejected, sending one by one is cheaper than splitting again.
-        return _Delivery(retry, isolated, deferred, deferred_alone=len(isolated) >= accepted)
+        deferred_alone = resolved and len(isolated) >= accepted
+        for batch, alone, part, from_fresh in batches:
+            group = next(self._sync_group_ids) if part and not deferred_alone else None
+            if group is None:
+                alone = deferred_alone and (part or not from_fresh)
+            for user in batch:
+                deferred.append((user, detail))
+                groups[user.email] = (group, alone)
+        if waiting:
+            self._sync_fresh_last = not waiting_sent
+        return _Delivery(retry, isolated, deferred, deferred_alone, groups, resolved)
 
     def _send_alone(self, user: User) -> bool:
         entry = self._sync_retries.get(user.email)
@@ -775,10 +829,11 @@ class Controller:
         entry.error = detail
         entry.attempts += 1
         entry.queued_at = None
+        entry.group = None
         entry.next_attempt = now + (self._sync_retry_delays[2] if late and user.inbounds else entry.delay)
         entry.delay = min(entry.delay * 2, self._sync_retry_delays[1])
 
-    def _defer_untested_user(self, user: User, detail: str, alone: bool) -> None:
+    def _defer_untested_user(self, user: User, detail: str, alone: bool, group: int | None = None) -> None:
         """Keep a user of a rejected batch that the round had no sends left to test.
 
         Like a rejected user it goes back through the queue, but at the next round, with no attempt
@@ -791,6 +846,7 @@ class Controller:
             self._sync_retries[user.email] = entry
         entry.user = user
         entry.alone = alone
+        entry.group = group
         entry.queued_at = None
         entry.next_attempt = now
 
@@ -892,7 +948,8 @@ class Controller:
                     for user, detail in isolated:
                         self._hold_rejected_user(user, detail)
                     for user, detail in deferred:
-                        self._defer_untested_user(user, detail, failed.deferred_alone)
+                        group, alone = failed.groups.get(user.email, (None, failed.deferred_alone))
+                        self._defer_untested_user(user, detail, alone, group)
                     failed_emails = {user.email for user in failed}
                     if self._sync_retries:
                         kept = {user.email for user, _ in (*isolated, *deferred)}
@@ -911,7 +968,7 @@ class Controller:
                         await self._increment_user_sync_failure()
                         await asyncio.sleep(retry_delay)
                         retry_delay = min(retry_delay * 2, 30.0)
-                    else:
+                    elif getattr(failed, "resolved", True):
                         await self._reset_user_sync_failure_count()
                         retry_delay = 1.0
                 except Exception as exc:
