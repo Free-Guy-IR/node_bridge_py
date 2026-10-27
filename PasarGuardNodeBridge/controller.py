@@ -88,13 +88,16 @@ class _Delivery(list):
     sent one by one if ``deferred_alone`` (the round found as many rejected users as accepted ones).
     """
 
-    def __init__(self, failed=(), isolated=(), deferred=(), deferred_alone=False, groups=None, resolved=True):
+    def __init__(
+        self, failed=(), isolated=(), deferred=(), deferred_alone=False, groups=None, accepted=0, systemic=False
+    ):
         super().__init__(failed)
         self.isolated = list(isolated)
         self.deferred = list(deferred)
         self.deferred_alone = deferred_alone
         self.groups = dict(groups or {})
-        self.resolved = resolved
+        self.accepted = accepted
+        self.systemic = systemic
 
 
 @dataclass(slots=True)
@@ -256,6 +259,8 @@ class Controller:
         self._sync_send_times = _SendTimes()
         self._sync_group_ids = itertools.count()
         self._sync_fresh_last = False
+        self._sync_rejecting_since: float | None = None
+        self._sync_rejection_rounds = 0
 
         # Separate locks for different resources to reduce contention
         self._health_lock = asyncio.Lock()
@@ -308,6 +313,7 @@ class Controller:
         async with self._failure_count_lock:
             old_count = self._user_sync_failure_count
             self._user_sync_failure_count = 0
+            self._sync_rejecting_since = None
             # Clear hard reset event if it was set
             if self._hard_reset_event.is_set():
                 self._hard_reset_event.clear()
@@ -315,6 +321,24 @@ class Controller:
                     self.logger.info(
                         f"[{self.name}] User sync recovered after {old_count} failures, cleared hard reset event"
                     )
+
+    async def _count_systemic_rejection(self) -> None:
+        now = asyncio.get_running_loop().time()
+        if self._sync_rejecting_since is None:
+            self._sync_rejecting_since, self._sync_rejection_rounds = now, 0
+        self._sync_rejection_rounds += 1
+        rejecting = now - self._sync_rejecting_since
+        backoff = sum(min(2.0**step, 30.0) for step in range(self._hard_reset_threshold - 1))
+        if (
+            self._sync_rejection_rounds >= self._hard_reset_threshold
+            and rejecting >= backoff
+            and not self._hard_reset_event.is_set()
+        ):
+            self._hard_reset_event.set()
+            self.logger.critical(
+                f"[{self.name}] HARD RESET REQUIRED: node rejected every new user for {rejecting:.0f} s "
+                f"({self._sync_rejection_rounds} rounds) and accepted none"
+            )
 
     async def update_user(self, user: User):
         """Queue a user for sync. Automatically deduplicates by email."""
@@ -544,6 +568,7 @@ class Controller:
         self._hard_reset_event.clear()
         async with self._failure_count_lock:
             self._user_sync_failure_count = 0
+            self._sync_rejecting_since = None
 
         # Cleanup tasks with task lock
         async with self._task_lock:
@@ -726,6 +751,7 @@ class Controller:
         # A send may take up to the internal timeout: none starts that could outlast the round.
         stop_at = self._sync_round_end - self._internal_timeout
         deadline = self._sync_round_end - min(0.5, self._sync_lease_seconds / 16)
+        known = {email for email, entry in self._sync_retries.items() if entry.attempts}
         carried: dict[int, tuple[list[User], bool]] = {}
         for user in users:
             entry = self._sync_retries.get(user.email)
@@ -794,7 +820,8 @@ class Controller:
                 groups[user.email] = (group, alone)
         if waiting:
             self._sync_fresh_last = not waiting_sent
-        return _Delivery(retry, isolated, deferred, deferred_alone, groups, resolved)
+        systemic = not accepted and any(user.email not in known for user, _ in isolated)
+        return _Delivery(retry, isolated, deferred, deferred_alone, groups, accepted, systemic)
 
     def _send_alone(self, user: User) -> bool:
         entry = self._sync_retries.get(user.email)
@@ -853,6 +880,7 @@ class Controller:
     def _clear_rejected_users(self) -> None:
         """The node was given a full user set: payloads held for retry are older, so forget them."""
         self._sync_retries.clear()
+        self._sync_rejecting_since = None
 
     def _next_retry_at(self) -> float:
         held = [entry.next_attempt for entry in self._sync_retries.values() if entry.queued_at is None]
@@ -968,9 +996,11 @@ class Controller:
                         await self._increment_user_sync_failure()
                         await asyncio.sleep(retry_delay)
                         retry_delay = min(retry_delay * 2, 30.0)
-                    elif getattr(failed, "resolved", True):
+                    elif getattr(failed, "accepted", True):
                         await self._reset_user_sync_failure_count()
                         retry_delay = 1.0
+                    elif failed.systemic:
+                        await self._count_systemic_rejection()
                 except Exception as exc:
                     self.logger.warning(f"[{self.name}] User sync failed; retrying: {type(exc).__name__}: {exc!s}")
                     self._work_available.set()
