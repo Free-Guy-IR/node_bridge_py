@@ -89,7 +89,7 @@ class _Delivery(list):
     """
 
     def __init__(
-        self, failed=(), isolated=(), deferred=(), deferred_alone=False, groups=None, accepted=0, systemic=False
+        self, failed=(), isolated=(), deferred=(), deferred_alone=False, groups=None, accepted=0, systemic=()
     ):
         super().__init__(failed)
         self.isolated = list(isolated)
@@ -97,7 +97,7 @@ class _Delivery(list):
         self.deferred_alone = deferred_alone
         self.groups = dict(groups or {})
         self.accepted = accepted
-        self.systemic = systemic
+        self.systemic = list(systemic)
 
 
 @dataclass(slots=True)
@@ -260,7 +260,7 @@ class Controller:
         self._sync_group_ids = itertools.count()
         self._sync_fresh_last = False
         self._sync_rejecting_since: float | None = None
-        self._sync_rejection_rounds = 0
+        self._sync_rejected_users: set[str] = set()
 
         # Separate locks for different resources to reduce contention
         self._health_lock = asyncio.Lock()
@@ -322,22 +322,33 @@ class Controller:
                         f"[{self.name}] User sync recovered after {old_count} failures, cleared hard reset event"
                     )
 
-    async def _count_systemic_rejection(self) -> None:
-        now = asyncio.get_running_loop().time()
+    def _count_systemic_rejection(self, emails: list[str]) -> None:
         if self._sync_rejecting_since is None:
-            self._sync_rejecting_since, self._sync_rejection_rounds = now, 0
-        self._sync_rejection_rounds += 1
-        rejecting = now - self._sync_rejecting_since
-        backoff = sum(min(2.0**step, 30.0) for step in range(self._hard_reset_threshold - 1))
+            self._sync_rejecting_since = asyncio.get_running_loop().time()
+            self._sync_rejected_users = set()
+        for email in emails:
+            if len(self._sync_rejected_users) >= self._hard_reset_threshold:
+                break
+            self._sync_rejected_users.add(email)
+        self._raise_systemic_hard_reset_if_due()
+
+    def _systemic_hard_reset_due(self) -> float:
         if (
-            self._sync_rejection_rounds >= self._hard_reset_threshold
-            and rejecting >= backoff
-            and not self._hard_reset_event.is_set()
+            self._sync_rejecting_since is None
+            or len(self._sync_rejected_users) < self._hard_reset_threshold
+            or self._hard_reset_event.is_set()
         ):
+            return math.inf
+        backoff = sum(min(2.0**step, 30.0) for step in range(self._hard_reset_threshold - 1))
+        return self._sync_rejecting_since + backoff
+
+    def _raise_systemic_hard_reset_if_due(self) -> None:
+        now = asyncio.get_running_loop().time()
+        if now >= self._systemic_hard_reset_due():
             self._hard_reset_event.set()
             self.logger.critical(
-                f"[{self.name}] HARD RESET REQUIRED: node rejected every new user for {rejecting:.0f} s "
-                f"({self._sync_rejection_rounds} rounds) and accepted none"
+                f"[{self.name}] HARD RESET REQUIRED: node rejected {len(self._sync_rejected_users)} or more new "
+                f"users in {now - self._sync_rejecting_since:.0f} s and accepted none"
             )
 
     async def update_user(self, user: User):
@@ -820,7 +831,7 @@ class Controller:
                 groups[user.email] = (group, alone)
         if waiting:
             self._sync_fresh_last = not waiting_sent
-        systemic = not accepted and any(user.email not in known for user, _ in isolated)
+        systemic = [] if accepted else [user.email for user, _ in isolated if user.email not in known]
         return _Delivery(retry, isolated, deferred, deferred_alone, groups, accepted, systemic)
 
     def _send_alone(self, user: User) -> bool:
@@ -886,9 +897,12 @@ class Controller:
         held = [entry.next_attempt for entry in self._sync_retries.values() if entry.queued_at is None]
         return min(held, default=math.inf)
 
+    def _next_wake_at(self) -> float:
+        return min(self._next_retry_at(), self._systemic_hard_reset_due())
+
     def _sync_wait_timeout(self) -> float:
         """The worker's idle timeout, shortened to wake when the next rejected user is due."""
-        due = self._next_retry_at() - asyncio.get_running_loop().time()
+        due = self._next_wake_at() - asyncio.get_running_loop().time()
         return min(self._worker_idle_timeout, max(due, 0.0))
 
     async def _queue_due_rejected_users(self) -> None:
@@ -939,8 +953,9 @@ class Controller:
                 except TimeoutError:
                     # No await between this check and task exit: an enqueue either
                     # keeps this worker alive or sees a completed task and starts one.
-                    if not self._work_available.is_set() and self._next_retry_at() == math.inf:
+                    if not self._work_available.is_set() and self._next_wake_at() == math.inf:
                         return
+                self._raise_systemic_hard_reset_if_due()
                 try:
                     health = await self.get_health()
                     if health in (Health.NOT_CONNECTED, Health.INVALID):
@@ -1000,7 +1015,7 @@ class Controller:
                         await self._reset_user_sync_failure_count()
                         retry_delay = 1.0
                     elif failed.systemic:
-                        await self._count_systemic_rejection()
+                        self._count_systemic_rejection(failed.systemic)
                 except Exception as exc:
                     self.logger.warning(f"[{self.name}] User sync failed; retrying: {type(exc).__name__}: {exc!s}")
                     self._work_available.set()
