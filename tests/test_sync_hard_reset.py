@@ -150,6 +150,36 @@ class SystemicRejectionTests(SyncFakeTestCase):
                 self.assert_no_batch_repeats_a_user(core)
                 self.assert_nothing_lost(node, core, acked, latest)
 
+    async def test_a_burst_of_rejected_users_on_a_node_that_then_goes_quiet_is_hard_reset(self):
+        bound = backoff_before_threshold(5)
+        for lease in (1.0, 30.0):
+            for make in (self.grpc_node, self.rest_node):
+                with self.subTest(lease=lease, transport=make.__name__):
+                    core = FakeNodeCore(delay=0.01)
+                    core.reject_all = True
+                    node = await make(core, sync_lease_seconds=lease)
+                    raised = self.watch_hard_reset(node)
+                    started = await self.start(node, [user(f"u-{index}") for index in range(30)])
+                    await self.until_hard_reset(node, bound + 10)
+                    await node.disconnect()
+                    self.assertGreaterEqual(raised[0] - started, bound)
+                    self.assertLessEqual(raised[0] - started, bound + 2)
+
+    async def test_a_few_rejected_users_on_an_otherwise_quiet_node_never_hard_reset(self):
+        lease, threshold = 1.0, 3
+        for make in (self.grpc_node, self.rest_node):
+            with self.subTest(transport=make.__name__):
+                core = FakeNodeCore(delay=0.01)
+                node = await make(core, sync_lease_seconds=lease)
+                node._hard_reset_threshold = threshold
+                node._sync_retry_delays = (0.2, 0.4, 5.0)
+                raised = self.watch_hard_reset(node)
+                await self.start(node, [user("u-1", "bad"), user("u-2", "bad")])
+                await asyncio.sleep(3 * backoff_before_threshold(threshold))
+                await node.disconnect()
+                self.assertGreater(core.sends_with("u-1"), 3)
+                self.assertEqual(raised, [])
+
     async def test_a_reconnect_restarts_the_systemic_bound(self):
         lease, threshold = 1.0, 2
         for make in (self.grpc_node, self.rest_node):
