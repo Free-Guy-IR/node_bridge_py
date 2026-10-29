@@ -391,7 +391,8 @@ class Controller:
                         continue
                     self.logger.warning(f"[{self.name}] Lifecycle lease for {lease.operation} was lost")
                     return
-                valid_until = sent_at + lease.lease_seconds
+                if renewed is True:
+                    valid_until = sent_at + lease.lease_seconds
         except asyncio.CancelledError:
             pass
 
