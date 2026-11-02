@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import unittest
 from unittest.mock import patch
@@ -91,6 +92,17 @@ class LeakedCancelRequestCoordinator(InMemoryNodeLifecycleCoordinator):
         return answer
 
 
+class RecordingCoordinator(InMemoryNodeLifecycleCoordinator):
+    def __init__(self):
+        super().__init__()
+        self.answers = []
+
+    async def heartbeat(self, lease):
+        answer = await super().heartbeat(lease)
+        self.answers.append((lease.worker_id, answer))
+        return answer
+
+
 class LifecycleHeartbeatTeardownTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.in_flight = 0
@@ -170,7 +182,7 @@ class LifecycleHeartbeatTeardownTests(unittest.IsolatedAsyncioTestCase):
     async def test_release_finishes_when_a_lease_state_read_turns_cancellation_into_an_error(self):
         await self._assert_release_finishes("get_state")
 
-    async def _contend_during_holder_call(self, coordinator, lease_seconds):
+    async def _contend_during_holder_call(self, coordinator, lease_seconds, expect_warnings=True):
         holder = self.make_node(coordinator, "worker-a", lease_seconds)
         rival = self.make_node(coordinator, "worker-b", lease_seconds)
         conflicts = 0
@@ -187,7 +199,8 @@ class LifecycleHeartbeatTeardownTests(unittest.IsolatedAsyncioTestCase):
                     conflicts += 1
                 await asyncio.sleep(0.02)
 
-        with self.assertLogs(LOGGER_NAME, logging.WARNING):
+        logs = self.assertLogs(LOGGER_NAME, logging.WARNING) if expect_warnings else contextlib.nullcontext()
+        with logs:
             first = asyncio.create_task(holder.update_node())
             await asyncio.sleep(0.05)
             contender = asyncio.create_task(contend())
@@ -203,6 +216,19 @@ class LifecycleHeartbeatTeardownTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(conflicts, 10)
         self.assertEqual(coordinator.answers[0], "timeout")
         self.assertIn("renewed=True", coordinator.answers)
+
+    async def test_renewal_runs_under_an_eager_task_factory(self):
+        loop = asyncio.get_running_loop()
+        previous = loop.get_task_factory()
+        loop.set_task_factory(asyncio.eager_task_factory)
+        self.addCleanup(loop.set_task_factory, previous)
+        coordinator = RecordingCoordinator()
+        _, conflicts = await self._contend_during_holder_call(coordinator, FLAP_LEASE_SECONDS, expect_warnings=False)
+        holder_renewals = [answer for worker, answer in coordinator.answers if worker == "worker-a"]
+        self.assertEqual(self.max_in_flight, 1, coordinator.answers)
+        self.assertGreater(conflicts, 10)
+        self.assertGreaterEqual(len(holder_renewals), 2, coordinator.answers)
+        self.assertTrue(all(holder_renewals), coordinator.answers)
 
     async def test_a_contending_worker_never_overlaps_while_renewals_flap(self):
         coordinator = FlappingCoordinator()
