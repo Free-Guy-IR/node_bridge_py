@@ -22,6 +22,7 @@ class CancellationToErrorCoordinator(InMemoryNodeLifecycleCoordinator):
         super().__init__()
         self.stall_in = stall_in
         self.converting = True
+        self.calls = 0
 
     async def _stall(self):
         try:
@@ -32,9 +33,10 @@ class CancellationToErrorCoordinator(InMemoryNodeLifecycleCoordinator):
             raise RuntimeError("store call aborted") from e
 
     async def heartbeat(self, lease):
+        self.calls += 1
         if self.stall_in == "heartbeat":
             await self._stall()
-        if self.stall_in == "get_state":
+        if self.stall_in == "get_state" and self.calls == 3:
             return False
         return await super().heartbeat(lease)
 
@@ -67,6 +69,26 @@ class FlappingCoordinator(InMemoryNodeLifecycleCoordinator):
                     return False
             return False
         return await super().heartbeat(lease)
+
+
+class LeakedCancelRequestCoordinator(InMemoryNodeLifecycleCoordinator):
+    def __init__(self):
+        super().__init__()
+        self.leaked = False
+        self.answers = []
+
+    async def heartbeat(self, lease):
+        if not self.leaked:
+            self.leaked = True
+            self.answers.append("timeout")
+            asyncio.current_task().cancel()
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                raise TimeoutError("store call timed out") from None
+        answer = await super().heartbeat(lease)
+        self.answers.append(f"renewed={answer}")
+        return answer
 
 
 class LifecycleHeartbeatTeardownTests(unittest.IsolatedAsyncioTestCase):
@@ -137,7 +159,7 @@ class LifecycleHeartbeatTeardownTests(unittest.IsolatedAsyncioTestCase):
                 for task in list(node._lifecycle_heartbeat_tasks.values()):
                     task.cancel()
                 await asyncio.wait_for(update, 5)
-        self.assertTrue(done, f"update_node did not return after its call finished ({stall_in})")
+        self.assertTrue(done, f"update_node did not return after its call finished ({stall_in}, {coordinator.calls})")
         update.result()
         self.assertNotIn(NODE_ID, coordinator._leases)
         self.assertEqual(node._lifecycle_heartbeat_tasks, {})
@@ -148,10 +170,9 @@ class LifecycleHeartbeatTeardownTests(unittest.IsolatedAsyncioTestCase):
     async def test_release_finishes_when_a_lease_state_read_turns_cancellation_into_an_error(self):
         await self._assert_release_finishes("get_state")
 
-    async def test_a_contending_worker_never_overlaps_while_renewals_flap(self):
-        coordinator = FlappingCoordinator()
-        holder = self.make_node(coordinator, "worker-a", FLAP_LEASE_SECONDS)
-        rival = self.make_node(coordinator, "worker-b", FLAP_LEASE_SECONDS)
+    async def _contend_during_holder_call(self, coordinator, lease_seconds):
+        holder = self.make_node(coordinator, "worker-a", lease_seconds)
+        rival = self.make_node(coordinator, "worker-b", lease_seconds)
         conflicts = 0
         stop = asyncio.Event()
 
@@ -173,7 +194,19 @@ class LifecycleHeartbeatTeardownTests(unittest.IsolatedAsyncioTestCase):
             await first
             stop.set()
             await contender
+        return rival, conflicts
 
+    async def test_a_leaked_cancel_request_from_a_coordinator_does_not_end_renewal(self):
+        coordinator = LeakedCancelRequestCoordinator()
+        _, conflicts = await self._contend_during_holder_call(coordinator, LEASE_SECONDS)
+        self.assertEqual(self.max_in_flight, 1, coordinator.answers)
+        self.assertGreater(conflicts, 10)
+        self.assertEqual(coordinator.answers[0], "timeout")
+        self.assertIn("renewed=True", coordinator.answers)
+
+    async def test_a_contending_worker_never_overlaps_while_renewals_flap(self):
+        coordinator = FlappingCoordinator()
+        rival, conflicts = await self._contend_during_holder_call(coordinator, FLAP_LEASE_SECONDS)
         self.assertEqual(self.max_in_flight, 1, coordinator.answers)
         self.assertGreater(conflicts, 10)
         self.assertGreaterEqual(self.completed, 1)

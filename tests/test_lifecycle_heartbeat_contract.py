@@ -72,6 +72,7 @@ class HeartbeatContractTests(unittest.IsolatedAsyncioTestCase):
                 "contract", controller.worker_id, LifecycleOperation.UPDATE_NODE, LEASE_SECONDS
             )
             task = asyncio.create_task(controller._heartbeat_lifecycle_lease(lease, START))
+            controller._lifecycle_heartbeat_tasks[lease.token] = task
             while not task.done() and len(coordinator.calls) < max_calls:
                 await _real_sleep(0)
             stopped = task.done()
