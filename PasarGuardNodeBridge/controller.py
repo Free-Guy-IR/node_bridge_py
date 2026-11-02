@@ -371,7 +371,7 @@ class Controller:
         renewal = asyncio.current_task()
         valid_until = acquired_at + lease.lease_seconds
         try:
-            while not renewal.cancelling():
+            while self._lifecycle_heartbeat_tasks.get(lease.token) is renewal:
                 await asyncio.sleep(interval)
                 sent_at = loop.time()
                 try:
