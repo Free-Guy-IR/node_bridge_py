@@ -156,6 +156,8 @@ batch is split until the rejected users are alone, so everyone else is still
 delivered. A round makes at most 16 sends for this and starts none that could
 outlast the round; users not tested by then go back to the queue at once (to be
 sent one by one if the round found as many rejected users as accepted ones).
+Every send after the first in a round is cancelled if the round's deadline
+passes, and its users are sent again in the next round.
 Users the node rejected before are retried as one batch, then one by one if it
 is rejected again. The rejected users leave the queue and are queued again after a
 backoff, so they never hold back later updates: 2 seconds doubling to 60
@@ -185,8 +187,19 @@ that update on the node. A newer update through this controller forgets the
 user's backoff, and a successful `start(...)`, `sync_users(...)` or
 `flush_pending_users()` clears all of them. The backoff state lives in this
 controller's memory, one entry per user, and each controller on a shared store
-keeps its own. `sync_users_chunked` sets `rejected=True` on its returned failed
-list for such node rejections; transport errors are retried as a whole.
+keeps its own. While a full-sync fence is active, the claim of a user held for
+retry is returned to the queue for the snapshot instead of being held.
+`sync_users_chunked` sets `rejected=True` on its returned failed list for such
+node rejections; transport errors are retried as a whole.
+
+Rejected users do not count as failed deliveries. A node whose backend refuses
+every user is still flagged: once rounds that accept nobody have seen the node
+reject 5 users it had not rejected before, and no round accepts a user within
+15 seconds of the first of those rejections, `requires_hard_reset()` returns
+true. The same happens to a healthy node when 5 or more users it rejects for
+their own data arrive with nothing else to deliver in that window. A round that
+accepts a user clears it, and `connect(...)`, `start(...)` and
+`sync_users(...)` restart the count.
 
 `disconnect()` stops this controller's worker and preserves shared queued work.
 `connect()` wakes the worker to recover it. An external producer that writes
