@@ -119,6 +119,7 @@ class _RejectedUser:
     reported: bool = False
     alone: bool = False
     group: int | None = None
+    token: str | None = None
 
 
 class _SendTimes:
@@ -702,17 +703,20 @@ class Controller:
             self._work_available.set()
             raise
 
-    async def _ack_claimed_users(self, claimed_users: list[ClaimedUser]):
-        if not claimed_users:
-            return
+    async def _return_claims_to_a_snapshot(self, claimed_users: list[ClaimedUser]) -> bool:
         active, generation = await self._fence_state()
-        if active or generation != self._claim_generation:
-            refresh = getattr(self._user_sync_store, "refresh_claimed", None)
-            if callable(refresh):
-                await refresh(self.node_id, claimed_users)
-            else:
-                await self._requeue_claimed_users(claimed_users)
-            self._work_available.set()
+        if not active and generation == self._claim_generation:
+            return False
+        refresh = getattr(self._user_sync_store, "refresh_claimed", None)
+        if callable(refresh):
+            await refresh(self.node_id, claimed_users)
+        else:
+            await self._requeue_claimed_users(claimed_users)
+        self._work_available.set()
+        return True
+
+    async def _ack_claimed_users(self, claimed_users: list[ClaimedUser]):
+        if not claimed_users or await self._return_claims_to_a_snapshot(claimed_users):
             return
         unconfirmed = await self._user_sync_store.ack_users(self.node_id, [item.token for item in claimed_users])
         if unconfirmed:
@@ -726,6 +730,15 @@ class Controller:
         if claimed_users:
             self._work_available.set()
             await self._user_sync_store.requeue_users(self.node_id, claimed_users)
+
+    def _holds_claims(self) -> bool:
+        store = self._user_sync_store
+        return callable(getattr(store, "hold_users", None)) and callable(getattr(store, "requeue_held_users", None))
+
+    async def _hold_claimed_users(self, claimed_users: list[ClaimedUser]):
+        if not claimed_users or await self._return_claims_to_a_snapshot(claimed_users):
+            return
+        await self._user_sync_store.hold_users(self.node_id, [item.token for item in claimed_users])
 
     async def _deliver_claimed_users(self, claimed_users: list[ClaimedUser]) -> list[User]:
         users = [item.user for item in claimed_users]
@@ -838,7 +851,7 @@ class Controller:
         entry = self._sync_retries.get(user.email)
         return entry is not None and (entry.attempts > 0 or entry.alone)
 
-    def _hold_rejected_user(self, user: User, detail: str) -> None:
+    def _hold_rejected_user(self, user: User, detail: str, token: str | None = None) -> None:
         """Keep a user the node rejected out of the queue until its next retry is due.
 
         A rejection can be transient (the node's core API restarting), so it is never final: retries
@@ -865,13 +878,16 @@ class Controller:
             )
         entry.user = user
         entry.error = detail
+        entry.token = token
         entry.attempts += 1
         entry.queued_at = None
         entry.group = None
         entry.next_attempt = now + (self._sync_retry_delays[2] if late and user.inbounds else entry.delay)
         entry.delay = min(entry.delay * 2, self._sync_retry_delays[1])
 
-    def _defer_untested_user(self, user: User, detail: str, alone: bool, group: int | None = None) -> None:
+    def _defer_untested_user(
+        self, user: User, detail: str, alone: bool, group: int | None = None, token: str | None = None
+    ) -> None:
         """Keep a user of a rejected batch that the round had no sends left to test.
 
         Like a rejected user it goes back through the queue, but at the next round, with no attempt
@@ -885,6 +901,7 @@ class Controller:
         entry.user = user
         entry.alone = alone
         entry.group = group
+        entry.token = token
         entry.queued_at = None
         entry.next_attempt = now
 
@@ -928,18 +945,35 @@ class Controller:
         due.sort(key=lambda entry: entry.attempts > 0)
         due = due[: self._sync_batch_size]
         store = self._user_sync_store
+        held = [entry for entry in due if entry.token is not None]
+        untracked = [entry for entry in due if entry.token is None]
+        superseded: set[str] = set()
         async with asyncio.timeout(self._internal_timeout):
-            refresh = getattr(store, "request_refresh", None)
-            enqueue = getattr(store, "enqueue_users_if_absent", None)
-            if callable(refresh):
-                await refresh(self.node_id, [entry.user.email for entry in due])
-            elif callable(enqueue):
-                await enqueue(self.node_id, [entry.user for entry in due])
-            else:
-                await store.enqueue_users(self.node_id, [entry.user for entry in due])
+            if held:
+                superseded.update(
+                    await store.requeue_held_users(
+                        self.node_id, [ClaimedUser(token=entry.token, user=entry.user) for entry in held]
+                    )
+                )
+            if untracked:
+                await self._queue_untracked_retries([entry.user for entry in untracked])
         for entry in due:
-            entry.queued_at = now
+            if entry.user.email in superseded:
+                del self._sync_retries[entry.user.email]
+            else:
+                entry.queued_at = now
         self._work_available.set()
+
+    async def _queue_untracked_retries(self, users: list[User]) -> None:
+        store = self._user_sync_store
+        refresh = getattr(store, "request_refresh", None)
+        enqueue = getattr(store, "enqueue_users_if_absent", None)
+        if callable(refresh):
+            await refresh(self.node_id, [user.email for user in users])
+        elif callable(enqueue):
+            await enqueue(self.node_id, users)
+        else:
+            await store.enqueue_users(self.node_id, users)
 
     async def _sync_worker(self):
         """Drain bounded batches, retaining wakes and retrying failures with backoff."""
@@ -988,21 +1022,24 @@ class Controller:
                     # Users the round had no sends left to test are queued again at the next round.
                     isolated = getattr(failed, "isolated", ())
                     deferred = getattr(failed, "deferred", ())
+                    holds = self._holds_claims()
+                    tokens = {item.user.email: item.token for item in claimed} if holds else {}
                     for user, detail in isolated:
-                        self._hold_rejected_user(user, detail)
+                        self._hold_rejected_user(user, detail, tokens.get(user.email))
                     for user, detail in deferred:
                         group, alone = failed.groups.get(user.email, (None, failed.deferred_alone))
-                        self._defer_untested_user(user, detail, alone, group)
+                        self._defer_untested_user(user, detail, alone, group, tokens.get(user.email))
                     failed_emails = {user.email for user in failed}
+                    kept = {user.email for user, _ in (*isolated, *deferred)}
                     if self._sync_retries:
-                        kept = {user.email for user, _ in (*isolated, *deferred)}
                         for item in claimed:
                             if item.user.email not in failed_emails and item.user.email not in kept:
                                 self._sync_retries.pop(item.user.email, None)
+                    held = kept if holds else set()
+                    released = failed_emails | held
                     async with asyncio.timeout(self._internal_timeout):
-                        await self._ack_claimed_users(
-                            [item for item in claimed if item.user.email not in failed_emails]
-                        )
+                        await self._ack_claimed_users([item for item in claimed if item.user.email not in released])
+                        await self._hold_claimed_users([item for item in claimed if item.user.email in held])
                         await self._requeue_claimed_users(
                             [item for item in claimed if item.user.email in failed_emails]
                         )

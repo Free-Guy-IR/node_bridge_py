@@ -258,13 +258,18 @@ class SyncFakeTestCase(unittest.IsolatedAsyncioTestCase):
 
     def record_acks(self, node):
         acked = []
-        ack = node._ack_claimed_users
+        ack, hold = node._ack_claimed_users, node._hold_claimed_users
 
         async def recording_ack(claimed_users):
             acked.extend((item.user.email, list(item.user.inbounds)) for item in claimed_users)
             await ack(claimed_users)
 
+        async def recording_hold(claimed_users):
+            acked.extend((item.user.email, list(item.user.inbounds)) for item in claimed_users)
+            await hold(claimed_users)
+
         node._ack_claimed_users = recording_ack
+        node._hold_claimed_users = recording_hold
         return acked
 
     def assert_nothing_lost(self, node, core, acked, latest):

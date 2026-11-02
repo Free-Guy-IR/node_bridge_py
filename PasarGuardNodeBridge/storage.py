@@ -57,6 +57,11 @@ class UserSyncStoreProtocol(Protocol):
     async def clear(self, node_id: str) -> None: ...
 
 
+class HeldRetryUserSyncStoreProtocol(UserSyncStoreProtocol, Protocol):
+    async def hold_users(self, node_id: str, tokens: list[str]) -> None: ...
+    async def requeue_held_users(self, node_id: str, held_users: list[ClaimedUser]) -> list[str]: ...
+
+
 class SnapshotUserSyncStoreProtocol(UserSyncStoreProtocol, Protocol):
     """Optional shared coordination for full snapshots; all operations must be atomic."""
 
@@ -154,6 +159,7 @@ class InMemoryUserSyncStore:
         self._active: dict[str, dict[str, str]] = {}
         self._revision = 0
         self._fences: dict[str, tuple[str, float, int]] = {}
+        self._held: dict[str, dict[str, str]] = {}
         self._lock = asyncio.Lock()
 
     async def enqueue_users(self, node_id: str, users: list[User]) -> None:
@@ -161,7 +167,9 @@ class InMemoryUserSyncStore:
             return
         async with self._lock:
             pending = self._pending.setdefault(node_id, {})
+            held = self._held.get(node_id, {})
             for user in users:
+                held.pop(user.email, None)
                 self._revision += 1
                 pending[user.email] = (User.FromString(user.SerializeToString()), self._revision)
 
@@ -171,10 +179,49 @@ class InMemoryUserSyncStore:
             return
         async with self._lock:
             pending = self._pending.setdefault(node_id, {})
+            held = self._held.get(node_id, {})
             for user in users:
                 if user.email not in pending:
+                    held.pop(user.email, None)
                     self._revision += 1
                     pending[user.email] = (User.FromString(user.SerializeToString()), self._revision)
+
+    async def hold_users(self, node_id: str, tokens: list[str]) -> None:
+        if not tokens:
+            return
+        async with self._lock:
+            self._expire_claims(node_id)
+            claimed = self._claimed.setdefault(node_id, {})
+            pending = self._pending.setdefault(node_id, {})
+            active = self._active.setdefault(node_id, {})
+            held = self._held.setdefault(node_id, {})
+            for token in tokens:
+                item = claimed.pop(token, None)
+                if item is None:
+                    continue
+                email, revision, _ = item
+                active.pop(email, None)
+                if email in pending and pending[email][1] != revision:
+                    continue
+                pending.pop(email, None)
+                held[email] = token
+
+    async def requeue_held_users(self, node_id: str, held_users: list[ClaimedUser]) -> list[str]:
+        if not held_users:
+            return []
+        async with self._lock:
+            pending = self._pending.setdefault(node_id, {})
+            held = self._held.get(node_id, {})
+            superseded = []
+            for item in held_users:
+                email = item.user.email
+                if held.get(email) != item.token:
+                    superseded.append(email)
+                    continue
+                del held[email]
+                self._revision += 1
+                pending[email] = (User.FromString(item.user.SerializeToString()), self._revision)
+            return superseded
 
     def _expire_claims(self, node_id: str) -> None:
         claimed = self._claimed.setdefault(node_id, {})
@@ -293,6 +340,7 @@ class InMemoryUserSyncStore:
             self._pending.pop(node_id, None)
             self._claimed.pop(node_id, None)
             self._active.pop(node_id, None)
+            self._held.pop(node_id, None)
 
 
 class InMemoryNodeLifecycleCoordinator:

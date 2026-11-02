@@ -27,6 +27,7 @@ from PasarGuardNodeBridge.grpclib import Node as GrpcNode
 from PasarGuardNodeBridge.rest import Node as RestNode
 from PasarGuardNodeBridge.storage import (
     ClaimedUser,
+    HeldRetryUserSyncStoreProtocol,
     InMemoryNodeLifecycleCoordinator,
     InMemoryNodeRegistry,
     InMemoryUserSyncStore,
@@ -158,6 +159,7 @@ async def create_node_from_registry(
 __all__ = [
     "ClaimedUser",
     "Health",
+    "HeldRetryUserSyncStoreProtocol",
     "InMemoryNodeLifecycleCoordinator",
     "InMemoryNodeRegistry",
     "InMemoryUserSyncStore",
