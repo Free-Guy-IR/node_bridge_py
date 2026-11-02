@@ -198,8 +198,8 @@ reject 5 users it had not rejected before, and no round accepts a user within
 15 seconds of the first of those rejections, `requires_hard_reset()` returns
 true. The same happens to a healthy node when 5 or more users it rejects for
 their own data arrive with nothing else to deliver in that window. A round that
-accepts a user clears it, and `connect(...)`, `start(...)` and
-`sync_users(...)` restart the count.
+accepts a user and has no transport failure clears it, and `connect(...)`,
+`start(...)` and `sync_users(...)` restart the count.
 
 `disconnect()` stops this controller's worker and preserves shared queued work.
 `connect()` wakes the worker to recover it. An external producer that writes
