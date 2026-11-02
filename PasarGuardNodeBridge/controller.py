@@ -169,7 +169,7 @@ class Controller:
             lifecycle_coordinator if lifecycle_coordinator is not None else get_default_lifecycle_coordinator()
         )
         self._lifecycle_lease_seconds = lifecycle_lease_seconds
-        self._lifecycle_heartbeat_tasks: dict[str, asyncio.Task] = {}
+        self._lifecycle_heartbeat_tasks: dict[str, asyncio.Task | None] = {}
 
         # Hard reset mechanism for critical failures
         self._hard_reset_event = asyncio.Event()
@@ -368,10 +368,9 @@ class Controller:
     async def _heartbeat_lifecycle_lease(self, lease: LifecycleLease, acquired_at: float) -> None:
         interval = max(self._lifecycle_lease_seconds / 3, 0.01)
         loop = asyncio.get_running_loop()
-        renewal = asyncio.current_task()
         valid_until = acquired_at + lease.lease_seconds
         try:
-            while self._lifecycle_heartbeat_tasks.get(lease.token) is renewal:
+            while lease.token in self._lifecycle_heartbeat_tasks:
                 await asyncio.sleep(interval)
                 sent_at = loop.time()
                 try:
@@ -404,6 +403,7 @@ class Controller:
         )
         if lease is None:
             raise NodeAPIError(409, f"Node lifecycle operation already in progress for {self.node_id}")
+        self._lifecycle_heartbeat_tasks[lease.token] = None
         self._lifecycle_heartbeat_tasks[lease.token] = asyncio.create_task(
             self._heartbeat_lifecycle_lease(lease, requested_at)
         )
