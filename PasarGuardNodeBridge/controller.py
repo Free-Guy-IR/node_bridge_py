@@ -958,10 +958,11 @@ class Controller:
             if untracked:
                 await self._queue_untracked_retries([entry.user for entry in untracked])
         for entry in due:
-            if entry.user.email in superseded:
-                del self._sync_retries[entry.user.email]
-            else:
+            email = entry.user.email
+            if email not in superseded:
                 entry.queued_at = now
+            elif self._sync_retries.get(email) is entry:
+                del self._sync_retries[email]
         self._work_available.set()
 
     async def _queue_untracked_retries(self, users: list[User]) -> None:
