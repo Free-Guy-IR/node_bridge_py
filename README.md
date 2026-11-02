@@ -192,14 +192,18 @@ retry is returned to the queue for the snapshot instead of being held.
 `sync_users_chunked` sets `rejected=True` on its returned failed list for such
 node rejections; transport errors are retried as a whole.
 
-Rejected users do not count as failed deliveries. A node whose backend refuses
-every user is still flagged: once rounds that accept nobody have seen the node
-reject 5 users it had not rejected before, and no round accepts a user within
-15 seconds of the first of those rejections, `requires_hard_reset()` returns
-true. The same happens to a healthy node when 5 or more users it rejects for
-their own data arrive with nothing else to deliver in that window. A round that
-accepts a user and has no transport failure clears it, and `connect(...)`,
-`start(...)` and `sync_users(...)` restart the count.
+Rejected users do not count as failed deliveries. To still flag a node whose
+backend refuses every user, the controller counts the users rejected in rounds
+that complete with no accepted user and no failed delivery, leaving out users
+already waiting for a retry after an earlier rejection. Once 5 are counted and
+15 seconds have passed since the first of them, `requires_hard_reset()` returns
+true, unless a round has completed meanwhile with an accepted user and no failed
+delivery or storage error, which clears the count and the flag. A healthy node
+is flagged too when 5 or more users it rejects for their own data arrive with
+nothing else to deliver in that window. `connect(...)` clears the count and the
+flag; a successful `start(...)` or `sync_users(...)` restarts the count.
+Independently, 5 failed deliveries or storage errors set the flag when no round
+between them completes with an accepted user and no failure.
 
 `disconnect()` stops this controller's worker and preserves shared queued work.
 `connect()` wakes the worker to recover it. An external producer that writes
