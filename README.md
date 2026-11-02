@@ -268,6 +268,8 @@ Lifecycle operations are coordinated through the same model. The default process
 
 While an operation runs, the controller renews its lease by calling the coordinator's `heartbeat(lease)` every third of `lifecycle_lease_seconds`. Return `True` when the lease was renewed and `False` when this lease is no longer held (released, or expired and taken by another worker); the controller then stops renewing. An exception from `heartbeat` is logged and the next renewal is tried as usual.
 
+In this fork, `None` means the renewal was not reported (for example a coordinator whose store retries ran out): the controller keeps renewing. A `False` answer is confirmed before renewal stops: while `get_state(node_id)` still shows this lease's epoch, owner and operation, and less than `lease_seconds` has passed since the last renewal answered `True` (or since the lease was requested), the controller keeps renewing. Only a `True` answer moves that deadline. Renewal also ends once the operation releases its lease, even if the coordinator turns that cancellation into an ordinary error.
+
 ```python
 lifecycle = MyRedisLifecycleCoordinator(redis_client)
 

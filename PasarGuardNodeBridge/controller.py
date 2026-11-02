@@ -368,9 +368,10 @@ class Controller:
     async def _heartbeat_lifecycle_lease(self, lease: LifecycleLease, acquired_at: float) -> None:
         interval = max(self._lifecycle_lease_seconds / 3, 0.01)
         loop = asyncio.get_running_loop()
+        renewal = asyncio.current_task()
         valid_until = acquired_at + lease.lease_seconds
         try:
-            while True:
+            while not renewal.cancelling():
                 await asyncio.sleep(interval)
                 sent_at = loop.time()
                 try:
