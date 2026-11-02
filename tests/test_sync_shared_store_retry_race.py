@@ -1,4 +1,5 @@
 import asyncio
+import random
 import unittest
 
 from PasarGuardNodeBridge.common.service_pb2 import User
@@ -135,3 +136,83 @@ class SharedStoreRetryRaceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(on_node, {}, sends)
         self.assertEqual([inbounds for _, _, inbounds in sends], [["v1"], ["v2"]], sends)
+
+    async def test_flush_on_another_worker_supersedes_a_held_retry(self):
+        store = InMemoryUserSyncStore()
+        worker, on_node, sends = self.stale_race_workers(store, reject_newer=False)
+        held, other = worker("A"), worker("B")
+        await held.update_user(User(email="x", inbounds=["v1"]))
+        await held.connect("0.2.0", "1.0.0")
+        await eventually(lambda: "x" in held._sync_retries and held._sync_retries["x"].attempts == 1)
+
+        await other.flush_pending_users()
+        held._sync_retries["x"].next_attempt = 0
+        await held.wake_sync_worker()
+        await eventually(lambda: "x" not in held._sync_retries)
+        await asyncio.sleep(0.1)
+
+        self.assertEqual(on_node, {}, sends)
+        self.assertEqual([inbounds for _, _, inbounds in sends], [["v1"]], sends)
+        self.assertFalse(await store.has_pending("node"))
+
+    async def run_shared_store_hammer(self, seed):
+        rng = random.Random(seed)
+        store = InMemoryUserSyncStore()
+        emails = ["a", "b", "c", "d"]
+        latest, history, refusals = {}, {email: [] for email in emails}, {}
+        on_node = {}
+
+        def worker(name):
+            node = RecordingNode(user_sync_store=store, worker_id=name)
+            node._sync_retry_delays = (0.01, 0.04, 0.08)
+            node._sync_retry_window = 1.0
+            self.nodes.append(node)
+
+            async def send(users, **kwargs):
+                await asyncio.sleep(rng.choice((0, 0, 0.002, 0.01)))
+                payloads = [(user.email, int(user.inbounds[0][1:])) for user in users]
+                if any(refusals.get(payload, 0) for payload in payloads):
+                    for payload in payloads:
+                        if refusals.get(payload, 0):
+                            refusals[payload] -= 1
+                    return FailedUsers(users, rejected=True, detail="proxy is not a UserManager")
+                for email, version in payloads:
+                    on_node[email] = version
+                    history[email].append(version)
+                return []
+
+            node.sync_users_chunked = send
+            return node
+
+        workers = [worker(name) for name in ("A", "B", "C")]
+        for node in workers:
+            await node.connect("0.2.0", "1.0.0")
+        for version in range(1, 61):
+            email = rng.choice(emails)
+            latest[email] = version
+            refusals[(email, version)] = rng.choice((0, 0, 1, 1, 2))
+            await rng.choice(workers).update_user(User(email=email, inbounds=[f"v{version}"]))
+            await asyncio.sleep(rng.choice((0, 0.001, 0.005, 0.02)))
+
+        async def settled():
+            while on_node != latest or await store.has_pending("node"):
+                for node in workers:
+                    await node.wake_sync_worker()
+                await asyncio.sleep(0.01)
+
+        async with asyncio.timeout(8):
+            await settled()
+        await asyncio.sleep(0.3)
+        return latest, history, on_node
+
+    async def test_held_retries_never_move_a_user_back_across_workers_on_one_store(self):
+        for seed in range(12):
+            with self.subTest(seed=seed):
+                latest, history, on_node = await self.run_shared_store_hammer(seed)
+                self.assertEqual(on_node, latest, history)
+                for email, applied in history.items():
+                    self.assertEqual(applied, sorted(applied), f"{email} went back: {applied}")
+                for node in self.nodes:
+                    await node.disconnect()
+                    await node._json_client.close()
+                self.nodes = []

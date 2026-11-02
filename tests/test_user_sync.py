@@ -94,6 +94,71 @@ class QueueStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.store.enqueue_users_if_absent("node", [self.old])  # newer queued: kept
         self.assertEqual((await self.claim())[0].user, self.new)
 
+    async def hold(self, lease=30):
+        claimed = await self.claim(lease)
+        await self.store.hold_users("node", [item.token for item in claimed])
+        return claimed
+
+    async def test_held_payload_is_queued_again_while_nothing_newer_was_queued(self):
+        await self.store.enqueue_users("node", [self.old])
+        held = await self.hold()
+        self.assertFalse(await self.store.has_pending("node"))
+        self.assertEqual(await self.store.requeue_held_users("node", held), [])
+        again = await self.claim()
+        self.assertEqual([item.user for item in again], [self.old])
+        self.assertEqual(await self.store.requeue_held_users("node", held), ["a"])
+
+    async def test_held_payload_is_superseded_by_a_newer_change_queued_or_delivered(self):
+        for deliver in (False, True):
+            with self.subTest(deliver=deliver):
+                await self.store.clear("node")
+                await self.store.enqueue_users("node", [self.old])
+                held = await self.hold()
+                await self.store.enqueue_users("node", [self.new])
+                if deliver:
+                    newer = await self.claim()
+                    await self.store.ack_users("node", [newer[0].token])
+                self.assertEqual(await self.store.requeue_held_users("node", held), ["a"])
+                claimed = await self.claim()
+                self.assertEqual([item.user for item in claimed], [] if deliver else [self.new])
+
+    async def test_held_payload_is_superseded_by_a_newer_change_queued_during_its_delivery(self):
+        await self.store.enqueue_users("node", [self.old])
+        old = await self.claim()
+        await self.store.enqueue_users("node", [self.new])
+        await self.store.hold_users("node", [old[0].token])
+        self.assertEqual(await self.store.requeue_held_users("node", old), ["a"])
+        self.assertEqual((await self.claim())[0].user, self.new)
+
+    async def test_only_the_latest_holder_queues_its_payload_again(self):
+        await self.store.enqueue_users("node", [self.old])
+        first = await self.hold()
+        await self.store.enqueue_users("node", [self.new])
+        second = await self.hold()
+        self.assertEqual(await self.store.requeue_held_users("node", first), ["a"])
+        self.assertEqual(await self.store.requeue_held_users("node", second), [])
+        self.assertEqual((await self.claim())[0].user, self.new)
+
+    async def test_clear_and_enqueue_if_absent_supersede_a_held_payload(self):
+        await self.store.enqueue_users("node", [self.old])
+        held = await self.hold()
+        await self.store.clear("node")
+        self.assertEqual(await self.store.requeue_held_users("node", held), ["a"])
+        self.assertFalse(await self.store.has_pending("node"))
+
+        await self.store.enqueue_users("node", [self.old])
+        held = await self.hold()
+        await self.store.enqueue_users_if_absent("node", [self.new])
+        self.assertEqual(await self.store.requeue_held_users("node", held), ["a"])
+        self.assertEqual((await self.claim())[0].user, self.new)
+
+    async def test_an_expired_claim_holds_nothing_and_stays_queued(self):
+        await self.store.enqueue_users("node", [self.old])
+        expired = await self.claim(0)
+        await self.store.hold_users("node", [expired[0].token])
+        self.assertEqual(await self.store.requeue_held_users("node", expired), ["a"])
+        self.assertEqual((await self.claim())[0].user, self.old)
+
     async def test_requeue_uses_latest_store_payload_not_mutated_claim(self):
         await self.store.enqueue_users("node", [self.old])
         claim = await self.claim()
