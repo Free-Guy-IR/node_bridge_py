@@ -185,27 +185,31 @@ controllers on such a store, use `request_refresh` or set a
 payload queued again after another controller delivered a newer update replaces
 that update on the node. A newer update through this controller forgets the
 user's backoff, and a successful `start(...)`, `sync_users(...)` or
-`flush_pending_users()` clears all of them. The backoff state lives in this
+`flush_pending_users()` clears all of them (a delivery round already in flight
+then still holds the users it saw rejected). The backoff state lives in this
 controller's memory, one entry per user, and each controller on a shared store
 keeps its own. While a full-sync fence is active, the claim of a user held for
 retry is returned to the queue for the snapshot instead of being held.
 `sync_users_chunked` sets `rejected=True` on its returned failed list for such
 node rejections; transport errors are retried as a whole.
 
-Rejected users do not count as failed deliveries. A round fails when a delivery
-fails for a transport reason or the round raises an error (storage, resolver or
-deadline). To still flag a node whose backend refuses every user, each
-controller counts the users rejected in its rounds that accept nobody and do not
-fail, except users it is already retrying after the node rejected them on their
-own; a user that another controller put back for a retry counts as new. Once 5
-are counted and 15 seconds have passed since the first of them,
-`requires_hard_reset()` returns true, unless a round of that controller has
-meanwhile accepted a user without failing, which clears the count and the flag.
-A healthy node is flagged too when 5 or more users it rejects for their own data
-arrive with nothing else to deliver in that window. Independently, 5 failed
-rounds set the flag when no round between them accepts a user without failing.
-`connect(...)` clears both counts and the flag, and a successful `start(...)` or
-`sync_users(...)` restarts the rejection count.
+On nodes with chunked sync, rejected users do not count as failed deliveries; on
+older nodes every user that fails to sync fails the round. A round fails when a
+delivery fails for any reason other than a node rejection (transport, timeout,
+the node's core not running or another node error) or the round raises an error
+(storage, resolver or deadline). To still flag a node whose backend refuses
+every user, each controller counts the users rejected in its rounds that accept
+nobody and do not fail, except users it is already retrying after the node
+rejected them on their own; a user that another controller put back for a retry
+counts as new. Once 5 are counted and 15 seconds have passed since the first of
+them, `requires_hard_reset()` returns true, unless a round of that controller
+has meanwhile accepted a user without failing, which clears the count and the
+flag. A healthy node is flagged too when 5 or more users it rejects for their
+own data arrive with nothing else to deliver in that window. Independently, 5
+failed rounds set the flag when no round between them accepts a user without
+failing. `connect(...)` clears both counts and the flag, and a successful
+`start(...)` or `sync_users(...)` restarts the rejection count, though users
+rejected in a round already in flight still count.
 
 `disconnect()` stops this controller's worker and preserves shared queued work.
 `connect()` wakes the worker to recover it. An external producer that writes
