@@ -56,10 +56,14 @@ status = "version-only"
 upstream = "a01bdbb9a0870c7755f57007864dccb2828621ce"
 release = "v0.9.4"
 subject = "fix(sync): keep one rejected user from stalling a node's sync queue (#27)"
-status = "deferred"
-owner = "BRIDGE"
-until = "2026-11-05"
-reason = "prepared on deliver/bridge-27-20261102; open finding F-U27-1 stale held retry"
+status = "ported"
+fork = [
+    "67b35df2e34ec9fa1090f6d2945d36d592b30f56",
+    "e4fe5b12bc40b3c01fe3e9add7ffb873a1d1ed55",
+    "c8b6707fb79a431c85bb5b9fff82135b7c40f303",
+]
+match = "adapted"
+reason = "split into three commits for review; their changed lines equal a01bdbb's; the F-U27-1 fix 448eb04 builds on it"
 
 [[commit]]
 upstream = "f892a5ccb6cff597ec233854dea7abc46981d1bb"
