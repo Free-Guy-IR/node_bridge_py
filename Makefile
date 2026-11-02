@@ -33,7 +33,10 @@ sync_proto:
 check_proto:
 	PROTO_FRESHNESS=1 bash scripts/check_proto_drift.sh
 
+check_upstream:
+	uv run --frozen python scripts/check_upstream_parity.py
+
 test:
 	uv run --frozen python -m unittest discover -s tests -v
 
-.PHONY: sync_proto check_proto test
+.PHONY: sync_proto check_proto check_upstream test

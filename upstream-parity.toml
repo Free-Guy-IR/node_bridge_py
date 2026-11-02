@@ -1,0 +1,68 @@
+[upstream]
+repository = "PasarGuard/node_bridge_py"
+pypi = "pasarguard-node-bridge"
+floor = "v0.9.2"
+
+[[release]]
+tag = "v0.9.2"
+commit = "bec9cb224992b6d249cd57fb953c4c147a297ccc"
+
+[[release]]
+tag = "v0.9.3"
+commit = "89a12245efc1dd86a317d270fa6f909090cea212"
+
+[[release]]
+tag = "v0.9.4"
+commit = "f892a5ccb6cff597ec233854dea7abc46981d1bb"
+
+[[commit]]
+upstream = "27be20638dc02a95cab02498bbdb35457481a71f"
+release = "v0.9.2"
+subject = "Merge pull request #21 from DrSaeedHub/fix/reliable-user-sync"
+status = "ported"
+fork = ["a21d1151426edc40044a9f36fdc5b76f3a218725"]
+match = "patch-id"
+
+[[commit]]
+upstream = "bec9cb224992b6d249cd57fb953c4c147a297ccc"
+release = "v0.9.2"
+subject = "bump to v0.9.2"
+status = "version-only"
+
+[[commit]]
+upstream = "9fa9f264cde1cd4a759f67fe2fd1b559b74990d2"
+release = "v0.9.3"
+subject = "feat: add Masque message and integrate into Proxy and utils (#24)"
+status = "deferred"
+owner = "BRIDGE/PANEL-LEAD"
+until = "2026-11-05"
+reason = "upstream puts Masque at Proxy field 7, which the fork uses for Hysteria2; needs Masque at field 12 on node main first"
+
+[[commit]]
+upstream = "e408d7720b8f3581d4668c5f87887b3d69e66668"
+release = "v0.9.3"
+subject = "fix(controller): give maintenance calls a timeout longer than node-serviced's (#23)"
+status = "ported"
+fork = ["b7df83fee8f5c1c1177ebf7ae02083c736c0b186"]
+match = "patch-id"
+
+[[commit]]
+upstream = "89a12245efc1dd86a317d270fa6f909090cea212"
+release = "v0.9.3"
+subject = "bump to v0.9.3"
+status = "version-only"
+
+[[commit]]
+upstream = "a01bdbb9a0870c7755f57007864dccb2828621ce"
+release = "v0.9.4"
+subject = "fix(sync): keep one rejected user from stalling a node's sync queue (#27)"
+status = "deferred"
+owner = "BRIDGE"
+until = "2026-11-05"
+reason = "prepared on deliver/bridge-27-20261102; open finding F-U27-1 stale held retry"
+
+[[commit]]
+upstream = "f892a5ccb6cff597ec233854dea7abc46981d1bb"
+release = "v0.9.4"
+subject = "bump to v0.9.4"
+status = "version-only"
