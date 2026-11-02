@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 import unittest
 
@@ -6,6 +7,20 @@ from PasarGuardNodeBridge.common.service_pb2 import User
 from PasarGuardNodeBridge.controller import FailedUsers
 from PasarGuardNodeBridge.storage import InMemoryUserSyncStore
 from tests.test_user_sync import RecordingNode, eventually
+
+
+class PausingHeldStore(InMemoryUserSyncStore):
+    def __init__(self):
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.pause = False
+
+    async def requeue_held_users(self, node_id, held_users):
+        if self.pause:
+            self.entered.set()
+            await self.release.wait()
+        return await super().requeue_held_users(node_id, held_users)
 
 
 class SharedStoreRetryRaceTests(unittest.IsolatedAsyncioTestCase):
@@ -216,3 +231,39 @@ class SharedStoreRetryRaceTests(unittest.IsolatedAsyncioTestCase):
                     await node.disconnect()
                     await node._json_client.close()
                 self.nodes = []
+
+    async def run_local_change_during_held_requeue(self, change):
+        store = PausingHeldStore()
+        worker, on_node, sends = self.stale_race_workers(store, reject_newer=False)
+        node = worker("A")
+        await node.update_user(User(email="x", inbounds=["v1"]))
+        await node.connect("0.2.0", "1.0.0")
+        await eventually(lambda: "x" in node._sync_retries and node._sync_retries["x"].attempts == 1)
+
+        store.pause = True
+        node._sync_retries["x"].next_attempt = 0
+        with self.assertNoLogs("sync-test", logging.WARNING):
+            await node.wake_sync_worker()
+            await eventually(store.entered.is_set)
+            await change(node)
+            store.pause = False
+            store.release.set()
+            await asyncio.sleep(0.2)
+        self.assertEqual(node._user_sync_failure_count, 0)
+        return node, on_node, sends
+
+    async def test_a_local_change_during_a_held_requeue_does_not_fail_the_round(self):
+        async def newer(node):
+            await node.update_user(User(email="x", inbounds=["v2"]))
+
+        node, on_node, sends = await self.run_local_change_during_held_requeue(newer)
+        self.assertEqual(on_node, {"x": ["v2"]}, sends)
+        self.assertEqual(node._sync_retries, {})
+
+    async def test_a_local_flush_during_a_held_requeue_does_not_fail_the_round(self):
+        async def flush(node):
+            await node.flush_pending_users()
+
+        node, on_node, sends = await self.run_local_change_during_held_requeue(flush)
+        self.assertEqual(on_node, {}, sends)
+        self.assertEqual(node._sync_retries, {})
