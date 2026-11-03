@@ -2,6 +2,7 @@
 import argparse
 import dataclasses
 import datetime
+import difflib
 import json
 import os
 import re
@@ -23,7 +24,7 @@ REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 VERSION_LINE = re.compile(r'^([+-])\s*(?:Version:\s*|__version__\s*=\s*|version\s*=\s*)"?(\d[0-9A-Za-z.+-]*)"?\s*$')
 FULL_SHA_TOKEN = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
 REVERT = re.compile(r"This reverts commit ([0-9a-f]{7,40})")
-HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 DIFF = ("--format=", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/")
 STATUSES = ("ported", "version-only", "waived", "deferred")
 COMPLETE = ("ported", "version-only", "waived")
@@ -90,27 +91,41 @@ def diff_name(name: str, prefix: str) -> str | None:
     return name[len(prefix) :] if name.startswith(prefix) else None
 
 
-def parse_diff_rows(diff: str) -> tuple[dict[str, list[str]], dict[str, list[tuple[int, str]]]]:
-    added: dict[str, list[str]] = {}
-    deleted: dict[str, list[tuple[int, str]]] = {}
+@dataclasses.dataclass(frozen=True)
+class Hunk:
+    source: str | None
+    target: str | None
+    new_start: int
+    new_count: int
+    added: tuple[str, ...]
+    deleted: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class Deletion:
+    source: str
+    target: str | None
+    lines: tuple[str, ...]
+    after: tuple[str, ...]
+    start: int
+    end: int
+
+
+def parse_hunks(diff: str) -> list[Hunk]:
+    records: list[tuple[str | None, str | None, int, int, list[str], list[str]]] = []
     source = target = None
     old_left = new_left = 0
-    row = 0
     for line in diff.split("\n"):
         if old_left > 0 or new_left > 0:
             if line.startswith("+") and new_left > 0:
                 new_left -= 1
-                if target is not None:
-                    added.setdefault(target, []).append(line[1:])
+                records[-1][4].append(line[1:])
             elif line.startswith("-") and old_left > 0:
                 old_left -= 1
-                if source is not None:
-                    deleted.setdefault(source, []).append((row, line[1:]))
-                row += 1
+                records[-1][5].append(line[1:])
             elif line.startswith(" "):
                 old_left -= 1
                 new_left -= 1
-                row += 1
             elif not line.startswith("\\"):
                 old_left = new_left = 0
             if old_left > 0 or new_left > 0 or line.startswith(("+", "-", " ", "\\")):
@@ -125,36 +140,39 @@ def parse_diff_rows(diff: str) -> tuple[dict[str, list[str]], dict[str, list[tup
             hunk = HUNK.match(line)
             if hunk:
                 old_left = int(hunk.group(2) if hunk.group(2) is not None else 1)
-                new_left = int(hunk.group(3) if hunk.group(3) is not None else 1)
-                row = max(int(hunk.group(1)) - 1, 0) if old_left else int(hunk.group(1))
-    return added, deleted
+                new_left = int(hunk.group(4) if hunk.group(4) is not None else 1)
+                records.append((source, target, int(hunk.group(3)), new_left, [], []))
+    return [
+        Hunk(source, target, start, count, tuple(added), tuple(deleted))
+        for source, target, start, count, added, deleted in records
+    ]
+
+
+def landing_alignment(after: tuple[str, ...], head: tuple[str, ...]) -> dict[int, int]:
+    matcher = difflib.SequenceMatcher(None, after, head, autojunk=False)
+    return {block.a + step: block.b + step for block in matcher.get_matching_blocks() for step in range(block.size)}
+
+
+def kept_in_landing(lines, after, start: int, end: int, sequence) -> list[str]:
+    head = tuple(normalise(value) for value in sequence if normalise(value))
+    after = tuple(after)
+    aligned = landing_alignment(after, head)
+    lower = max((aligned[index] for index in range(start) if index in aligned), default=-1)
+    upper = min((aligned[index] for index in range(end, len(after)) if index in aligned), default=len(head))
+    taken = set(aligned.values())
+    region = {head[index] for index in range(lower + 1, upper) if index not in taken}
+    return [line for line in dict.fromkeys(normalise(value) for value in lines) if line and line in region]
 
 
 def parse_diff(diff: str) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    added, deleted = parse_diff_rows(diff)
-    return added, {path: [text for _, text in rows] for path, rows in deleted.items()}
-
-
-def deletion_contexts(old: list[str], rows: list[tuple[int, str]]) -> list[tuple[str, str | None, str | None]]:
-    solid = [(index, normalise(line)) for index, line in enumerate(old) if normalise(line)]
-    contexts = []
-    for row, text in rows:
-        line = normalise(text)
-        if not line:
-            continue
-        before = [value for index, value in solid if index < row]
-        after = [value for index, value in solid if index > row]
-        contexts.append((line, before[-1] if before else None, after[0] if after else None))
-    return contexts
-
-
-def kept_beside_neighbours(context: tuple[str, str | None, str | None], sequence: list[str]) -> bool:
-    line, before, after = context
-    solid = [normalise(value) for value in sequence if normalise(value)]
-    if before is None and after is None:
-        return line in solid
-    pairs = set(zip(solid, solid[1:]))
-    return (before is not None and (before, line) in pairs) or (after is not None and (line, after) in pairs)
+    added: dict[str, list[str]] = {}
+    deleted: dict[str, list[str]] = {}
+    for hunk in parse_hunks(diff):
+        if hunk.target is not None and hunk.added:
+            added.setdefault(hunk.target, []).extend(hunk.added)
+        if hunk.source is not None and hunk.deleted:
+            deleted.setdefault(hunk.source, []).extend(hunk.deleted)
+    return added, deleted
 
 
 def version_key(name: str) -> tuple[int, ...] | None:
@@ -283,15 +301,28 @@ class Git:
             return None
         return result.stdout.split("\n")
 
-    def deletions(self, sha: str) -> dict[str, list[tuple[str, str | None, str | None]]]:
-        diff = self.run("show", *DIFF, "--diff-merges=off", "--no-renames", "--unified=0", sha).stdout
-        return {
-            path: deletion_contexts(self.file_sequence(f"{sha}^", path) or [], rows)
-            for path, rows in parse_diff_rows(diff)[1].items()
-        }
-
-    def deletes_file(self, sha: str, path: str) -> bool:
-        return self.file_sequence(f"{sha}^", path) is not None and self.file_sequence(sha, path) is None
+    def deletions(self, sha: str) -> list[Deletion]:
+        diff = self.run("show", *DIFF, "--diff-merges=off", "--find-renames", "--unified=0", sha).stdout
+        images: dict[str, list[str]] = {}
+        found: list[Deletion] = []
+        for hunk in parse_hunks(diff):
+            lines = tuple(line for line in map(normalise, hunk.deleted) if line)
+            if hunk.source is None or not lines:
+                continue
+            if hunk.target is None:
+                found.append(Deletion(hunk.source, None, lines, (), 0, 0))
+                continue
+            if hunk.target not in images:
+                images[hunk.target] = self.file_sequence(sha, hunk.target) or []
+            raw = images[hunk.target]
+            low = hunk.new_start - 1 if hunk.new_count else hunk.new_start
+            high = low + hunk.new_count
+            solid = [index for index, value in enumerate(raw) if normalise(value)]
+            after = tuple(normalise(raw[index]) for index in solid)
+            start = sum(1 for index in solid if index < low)
+            end = sum(1 for index in solid if index < high)
+            found.append(Deletion(hunk.source, hunk.target, lines, after, start, end))
+        return found
 
     def rev_list(self, include: list[str], exclude: list[str]) -> list[Commit]:
         args = ["log", "--format=%H%x09%s", *include]
@@ -519,36 +550,74 @@ def fork_paths(entry: dict, label: str, git: Git, report: Report) -> dict[str, s
     return valid
 
 
+def kept_listing(entry: dict, label: str, report: Report) -> set[tuple[str, str]]:
+    items = entry.get("kept_deleted_lines", [])
+    if not isinstance(items, list):
+        report.fail(
+            f"{label}: `kept_deleted_lines` must be a list of {{line, path, reason}} tables, got {type(items).__name__}"
+        )
+        return set()
+    listed: set[tuple[str, str]] = set()
+    for item in items:
+        raw = item.get("line") if isinstance(item, dict) else None
+        if not isinstance(raw, str):
+            report.fail(f"{label}: a `kept_deleted_lines` item needs a string `line`, got {raw!r}")
+            continue
+        line = normalise(raw)
+        if not line:
+            report.fail(f"{label}: a `kept_deleted_lines` item needs a non-empty `line`")
+            continue
+        path = item.get("path")
+        if not isinstance(path, str) or not path or path != path.strip():
+            report.fail(f"{label}: kept deleted line {line[:80]!r} needs a `path`, the file at HEAD that keeps it")
+            continue
+        if not str(item.get("reason", "")).strip():
+            report.fail(f"{label}: kept deleted line {line[:80]!r} needs a `reason`")
+            continue
+        if (path, line) in listed:
+            report.fail(f"{label}: kept deleted line {line[:80]!r} in {path} is listed twice in `kept_deleted_lines`")
+            continue
+        listed.add((path, line))
+    return listed
+
+
 def check_deleted_lines(entry: dict, label: str, paths: dict[str, str], git: Git, head: str, report: Report) -> None:
     upstream_sha = entry["upstream"]
-    listed = listed_lines(entry, "kept_deleted_lines", "kept deleted line", label, report)
+    listed = kept_listing(entry, label, report)
     deletions = git.deletions(upstream_sha)
-    deleted = {context[0] for contexts in deletions.values() for context in contexts}
-    kept_anywhere: set[str] = set()
-    for path, contexts in sorted(deletions.items()):
-        target = paths.get(path, path)
-        sequence = git.file_sequence(head, target)
-        if sequence is None:
-            if not git.deletes_file(upstream_sha, path):
-                report.fail(
-                    f"{label}: upstream {upstream_sha[:10]} deletes lines from {path}, but {target} is not at HEAD;"
-                    " map it in `fork_paths` if the fork keeps it elsewhere"
-                )
-            continue
-        kept = [context[0] for context in contexts if kept_beside_neighbours(context, sequence)]
-        kept_anywhere.update(kept)
-        unlisted = [line for line in kept if line not in listed]
-        if unlisted:
+    deleted = {line for deletion in deletions for line in deletion.lines}
+    kept_at: set[tuple[str, str]] = set()
+    unlisted: dict[tuple[str, str], dict[str, None]] = {}
+    for deletion in deletions:
+        own = deletion.target or deletion.source
+        mapped = paths.get(own, paths.get(deletion.source, own))
+        if deletion.target is not None and git.file_sequence(head, mapped) is None:
             report.fail(
-                f"{label}: {len(unlisted)} line(s) upstream {upstream_sha[:10]} deleted from {path} are still"
-                f" at HEAD in {target} beside an upstream neighbour and not listed in `kept_deleted_lines`,"
-                f" first {unlisted[0][:100]!r}"
+                f"{label}: upstream {upstream_sha[:10]} deletes lines from {own}, but {mapped} is not at HEAD;"
+                " map it in `fork_paths` if the fork keeps it elsewhere"
             )
-    for line in listed:
+        for home in dict.fromkeys(path for path in (mapped, deletion.target, deletion.source) if path is not None):
+            sequence = git.file_sequence(head, home)
+            if sequence is None:
+                continue
+            for line in kept_in_landing(deletion.lines, deletion.after, deletion.start, deletion.end, sequence):
+                kept_at.add((home, line))
+                if (home, line) not in listed:
+                    unlisted.setdefault((deletion.source, home), {})[line] = None
+    for (source, home), lines in sorted(unlisted.items()):
+        first = next(iter(lines))
+        report.fail(
+            f"{label}: {len(lines)} line(s) upstream {upstream_sha[:10]} deleted from {source} are still"
+            f" at HEAD in {home} inside upstream's change and not listed in `kept_deleted_lines`,"
+            f" first {first[:100]!r}"
+        )
+    for home, line in sorted(listed):
         if line not in deleted:
             report.fail(f"{label}: kept deleted line {line[:80]!r} is not an upstream deleted line")
-        elif line not in kept_anywhere:
-            report.fail(f"{label}: kept deleted line {line[:80]!r} is listed, but HEAD no longer keeps it")
+        elif (home, line) not in kept_at:
+            report.fail(
+                f"{label}: kept deleted line {line[:80]!r} in {home} is listed, but HEAD no longer keeps it there"
+            )
 
 
 def check_no_added_lines(

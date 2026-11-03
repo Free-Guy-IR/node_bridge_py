@@ -86,13 +86,10 @@ class FakeGit:
         return sorted(self.files[path]) if path in self.files else None
 
     def deletions(self, sha):
-        return {
-            path: [(parity.normalise(line), None, None) for line in lines if parity.normalise(line)]
+        return [
+            parity.Deletion(path, path, tuple(filter(None, map(parity.normalise, lines))), (), 0, 0)
             for path, lines in self.deleted.get(sha, {}).items()
-        }
-
-    def deletes_file(self, sha, path):
-        return False
+        ]
 
 
 def make_snapshot():
@@ -806,13 +803,18 @@ class AdaptedPortOnRealGitTests(unittest.TestCase):
         )
         self.assertFailsWith(self.failures(row), "1 line(s) upstream")
         self.assertFailsWith(self.failures(row), "not listed in `kept_deleted_lines`, first 'check_auth()'")
-        row["kept_deleted_lines"] = [{"line": "  check_auth()", "reason": "the fork keeps the auth guard"}]
+        row["kept_deleted_lines"] = [{"line": "  check_auth()", "path": "m.py", "reason": "the fork keeps the guard"}]
         self.assertEqual(self.failures(row), [])
-        row["kept_deleted_lines"].append({"line": "log()", "reason": "stale"})
-        self.assertFailsWith(self.failures(row), "kept deleted line 'log()' is listed, but HEAD no longer keeps it")
-        row["kept_deleted_lines"] = [{"line": "check_auth()", "reason": "x"}, {"line": "never()", "reason": "x"}]
+        row["kept_deleted_lines"].append({"line": "log()", "path": "m.py", "reason": "stale"})
+        self.assertFailsWith(
+            self.failures(row), "kept deleted line 'log()' in m.py is listed, but HEAD no longer keeps it"
+        )
+        row["kept_deleted_lines"] = [
+            {"line": "check_auth()", "path": "m.py", "reason": "x"},
+            {"line": "never()", "path": "m.py", "reason": "x"},
+        ]
         self.assertFailsWith(self.failures(row), "kept deleted line 'never()' is not an upstream deleted line")
-        row["kept_deleted_lines"] = [{"line": "check_auth()"}]
+        row["kept_deleted_lines"] = [{"line": "check_auth()", "path": "m.py"}]
         self.assertFailsWith(self.failures(row), "kept deleted line 'check_auth()' needs a `reason`")
 
     def test_bj_h3_2_an_upstream_line_counts_only_on_its_own_path_or_a_declared_fork_path(self):
@@ -859,13 +861,93 @@ class AdaptedPortOnRealGitTests(unittest.TestCase):
         row["no_added_lines"] = "upstream only drops h"
         self.assertEqual(self.failures(row), [])
 
-    def test_a_deleted_line_is_kept_only_beside_an_upstream_neighbour(self):
-        old = ["a", "", "x()", "  y()", "b"]
-        contexts = parity.deletion_contexts(old, [(2, "x()"), (3, "  y()"), (1, "")])
-        self.assertEqual(contexts, [("x()", "a", "y()"), ("y()", "x()", "b")])
-        self.assertTrue(parity.kept_beside_neighbours(contexts[0], ["a", "x()", "b"]))
-        self.assertFalse(parity.kept_beside_neighbours(contexts[0], ["b", "x()", "c"]))
-        self.assertTrue(parity.kept_beside_neighbours(("only", None, None), ["z", "only"]))
+    def test_bj_h4_1_a_deleted_line_kept_where_upstream_rewrote_its_neighbours_fails(self):
+        row = self.port(
+            {"m.py": "def f():\n    require_admin()\n    return x\n"},
+            {"m.py": "def f(a):\n    return x + a\n"},
+            {"m.py": "def f(a):\n    require_admin()\n    return x + a\n"},
+        )
+        self.assertFailsWith(self.failures(row), "first 'require_admin()'")
+
+    def test_bj_h4_2_a_deleted_block_kept_in_swapped_order_fails(self):
+        row = self.port(
+            {"m.py": "def f():\n    a = load()\n    disable_tls()\n    trust_all()\n    return a\n"},
+            {"m.py": "def f():\n    a = load()\n    return a\n\ndef g():\n    return 2\n"},
+            {
+                "m.py": "def f():\n    a = load()\n    trust_all()\n    disable_tls()\n    return a\n\n"
+                "def g():\n    return 2\n"
+            },
+        )
+        self.assertFailsWith(self.failures(row), "2 line(s) upstream")
+
+    def test_bj_h4_3_a_line_deleted_while_upstream_renames_its_file_is_checked_on_the_new_path(self):
+        row = self.port(
+            {"old.py": "def f():\n    verify = False\n    return 1\n"},
+            {"old.py": None, "new.py": "def f():\n    return 1\n"},
+            {"old.py": None, "new.py": "def f():\n    verify = False\n    return 1\n"},
+        )
+        self.assertFailsWith(self.failures(row), "deleted from old.py are still at HEAD in new.py")
+
+    def test_bj_h4_3_a_faithful_port_of_a_rename_with_a_deletion_passes(self):
+        faithful = self.port(
+            {"o2.py": "def f():\n    verify = False\n    return 1\n"},
+            {"o2.py": None, "n2.py": "def f():\n    return 1\n"},
+            {"o2.py": None, "n2.py": "def f():\n    return 1\n"},
+        )
+        faithful["no_added_lines"] = "upstream only renames o2.py and drops a line"
+        self.assertEqual(self.failures(faithful), [])
+
+    def test_bj_h4_4_a_kept_deleted_line_is_excused_only_on_its_own_path(self):
+        row = self.port(
+            {
+                "a.py": "def f():\n    debug = True\n    return 1\n",
+                "b.py": "def g():\n    debug = True\n    return 2\n",
+            },
+            {"a.py": "def f():\n    return 1\n", "b.py": "def g():\n    return 2\n"},
+            {
+                "a.py": "def f():\n    debug = True\n    return 1\n\ny = 1\n",
+                "b.py": "def g():\n    debug = True\n    return 2\n\nz = 1\n",
+            },
+        )
+        row["no_added_lines"] = "n"
+        row["kept_deleted_lines"] = [{"line": "debug = True", "path": "a.py", "reason": "a.py keeps its flag"}]
+        self.assertFailsWith(self.failures(row), "deleted from b.py are still at HEAD in b.py")
+        self.assertFalse(any("a.py are still" in failure for failure in self.failures(row)))
+        row["kept_deleted_lines"] = [{"line": "debug = True", "reason": "no path"}]
+        self.assertFailsWith(self.failures(row), "kept deleted line 'debug = True' needs a `path`")
+        row["kept_deleted_lines"] = [
+            {"line": "debug = True", "path": "a.py", "reason": "x"},
+            {"line": "debug = True", "path": "b.py", "reason": "x"},
+        ]
+        self.assertEqual(self.failures(row), [])
+        row["kept_deleted_lines"].append({"line": "debug = True", "path": "c.py", "reason": "x"})
+        self.assertFailsWith(self.failures(row), "kept deleted line 'debug = True' in c.py is listed, but HEAD")
+
+    def test_bj_h4_5_a_mapped_upstream_path_still_at_head_is_checked_too(self):
+        row = self.port(
+            {"auth.py": "def check():\n    allow_all = True\n    return ok\n", "fork_auth.py": "x = 0\n"},
+            {"auth.py": "def check():\n    return verify_token()\n"},
+            {"fork_auth.py": "x = 0\ndef check():\n    return verify_token()\n"},
+        )
+        row["fork_paths"] = {"auth.py": "fork_auth.py"}
+        self.assertFailsWith(self.failures(row), "deleted from auth.py are still at HEAD in auth.py")
+
+    def test_bj_h4_6_a_faithful_port_passes_beside_generic_deleted_lines_elsewhere(self):
+        body = "    if x:\n        return 1\n    else:\n        pass\n    return 2\n"
+        row = self.port(
+            {"m.py": f"def f(x):\n{body}\ndef h(x):\n{body}"},
+            {"m.py": f"def f(x):\n    if x:\n        return 1\n    return 2\n\ndef h(x):\n{body}\nq = 1\n"},
+            {"m.py": f"def f(x):\n    if x:\n        return 1\n    return 2\n\ndef h(x):\n{body}\nq = 1\n"},
+        )
+        self.assertEqual(self.failures(row), [])
+
+    def test_a_deleted_line_counts_only_inside_its_hunk_landing_region(self):
+        after = ["def f(a):", "return x + a", "def g():", "keep()"]
+        inside = ["def f(a):", "require_admin()", "return x + a", "def g():", "keep()"]
+        outside = ["def f(a):", "return x + a", "def g():", "require_admin()", "keep()"]
+        self.assertEqual(parity.kept_in_landing(["require_admin()"], after, 1, 2, inside), ["require_admin()"])
+        self.assertEqual(parity.kept_in_landing(["require_admin()"], after, 1, 2, outside), [])
+        self.assertEqual(parity.kept_in_landing(["x()"], [], 0, 0, ["a", "x()"]), ["x()"])
 
 
 class DiffReaderTests(unittest.TestCase):
