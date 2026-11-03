@@ -132,7 +132,7 @@ class Git:
         if not diff.strip():
             return None
         result = subprocess.run(
-            ["git", "-C", str(self.root), "patch-id", "--stable"],
+            ["git", "-C", str(self.root), "patch-id", "--verbatim"],
             input=diff,
             capture_output=True,
             text=True,

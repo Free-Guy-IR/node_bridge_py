@@ -2,6 +2,7 @@ import copy
 import datetime
 import importlib.util
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -293,6 +294,26 @@ class UpstreamParityTests(unittest.TestCase):
     def test_parse_ls_remote_rejects_malformed_lines(self):
         with self.assertRaises(parity.ParityError):
             parity.parse_ls_remote("not-a-sha\trefs/tags/v1.0.0")
+
+    def test_patch_id_tells_apart_ports_that_differ_only_in_indentation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            git = parity.Git(root)
+            git.run("init", "-q", "-b", "main")
+            git.run("config", "user.email", "t@example.test")
+            git.run("config", "user.name", "t")
+            (root / "sync.py").write_text("for u in users:\n    push(u)\n")
+            git.run("add", "sync.py")
+            git.run("commit", "-q", "-m", "base")
+            base = git.resolve("HEAD")
+            (root / "sync.py").write_text("for u in users:\n    push(u)\n    mark(u)\n")
+            git.run("commit", "-q", "-am", "inside the loop")
+            inside = git.resolve("HEAD")
+            git.run("reset", "-q", "--hard", base)
+            (root / "sync.py").write_text("for u in users:\n    push(u)\nmark(u)\n")
+            git.run("commit", "-q", "-am", "after the loop")
+            after = git.resolve("HEAD")
+            self.assertNotEqual(git.patch_id(inside), git.patch_id(after))
 
     def test_repository_ledger_is_well_formed(self):
         with open(parity.LEDGER, "rb") as handle:
