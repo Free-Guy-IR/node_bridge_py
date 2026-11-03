@@ -164,33 +164,57 @@ backoff, so they never hold back later updates: 2 seconds doubling to 60
 seconds; after about 10 minutes an add is retried every 5 minutes (a removal
 stays at 60 seconds) and one error is logged for that user. Nothing is dropped.
 A retry goes back through the store and is claimed with a lease like any other
-update, so a newer update for the same user always wins. When the store has
-`hold_users(node_id, tokens)` and `requeue_held_users(node_id, held_users)` (the
-default store has both, see `HeldRetryUserSyncStoreProtocol`), the controller
-releases the claim of a user it holds for retry with `hold_users` instead of
-`ack_users`, and the store remembers that claim token as the user's held retry.
-When the backoff is over, `requeue_held_users` gets the token and the held
-payload as `ClaimedUser` items: the store queues the payload again only if no
-update for that user was queued and the node's queue was not cleared since the
-hold, and returns the emails it did not queue; the controller forgets their
-backoff. A held payload then never replaces a newer update, even one that
-another controller on the same store already delivered or holds in its own
-backoff, and `flush_pending_users()` on any controller cancels every held retry.
-Without these two methods the controller acknowledges the claim and later calls
-the store's `request_refresh(node_id, emails)` when it has one, otherwise
-`enqueue_users_if_absent(node_id, users)`, otherwise `enqueue_users` with the
-held payload, which could replace a newer queued update. With several
-controllers on such a store, use `request_refresh` or set a
-`user_sync_resolver` so every delivery reads the current state: otherwise a held
-payload queued again after another controller delivered a newer update replaces
-that update on the node. A newer update through this controller forgets the
-user's backoff, and a successful `start(...)`, `sync_users(...)` or
-`flush_pending_users()` clears all of them (a delivery round whose send is still
-in flight may then hold again the users it sees rejected). The backoff state
-lives in this
-controller's memory, one entry per user, and each controller on a shared store
-keeps its own. While a full-sync fence is active, the claim of a user held for
-retry is returned to the queue for the snapshot instead of being held.
+update, so a newer update for the same user always wins. A held payload is never
+queued again under a new revision. How a rejected user waits out its backoff
+depends on what the store provides:
+
+- Held retry, when the store has `hold_users(node_id, tokens, retry_after)` (the
+  default store has it, see `HeldRetryUserSyncStoreProtocol`). The controller
+  releases the claim with `hold_users` instead of `ack_users`, with
+  `retry_after` set to the user's backoff in seconds. For each token it still
+  leases, the store must atomically release the claim and, when the queued entry
+  still has the claimed revision, keep that entry queued at the same revision
+  but not claimable until `retry_after` seconds have passed; a newer queued
+  revision is not delayed. A token whose lease expired, or that was acknowledged,
+  requeued or cleared, is ignored. A later `enqueue_users` for the user replaces
+  the held entry and can be claimed at once. `claim_users` skips a hold that is
+  not due and drops the hold when it claims the entry. `has_pending` does not
+  report a hold that is not due, so no controller polls for it.
+  `capture_queued` reports held entries with their revision, `retire_captured`
+  drops a held entry whose captured revision it retires, and `clear` drops every
+  hold. The retry thus lives in the store: any controller on the store claims it
+  once it is due, a full sync covers it, a controller that stops does not lose
+  it, and `flush_pending_users()` on any controller cancels it. The controller
+  only keeps the attempt count and the next delay.
+- Refresh, when the store has `request_refresh(node_id, emails)` but no
+  `hold_users`, as a store that rebuilds payloads from application state does.
+  The controller acknowledges the claim and, once the backoff is over, calls
+  `request_refresh` so the store queues the user's current state. Until then the
+  retry exists only in this controller's memory, so a controller that stops
+  before it is due loses it, and the next full sync is what delivers that user.
+- Lease, when the store has neither. The controller neither acknowledges nor
+  requeues the claim: it keeps the lease for the backoff, then returns the claim
+  with `requeue_users`, so the queued entry keeps its revision and a newer
+  update replaces it. While it keeps claims it does not poll `has_pending`; it
+  still wakes at least every 5 seconds. Leases are not renewed, so on these
+  stores a backoff lasts at most `sync_lease_seconds`, after which any
+  controller can claim the user again. A newer update through the keeping
+  controller, a successful `start(...)` or `sync_users(...)`, and an active
+  full-sync fence make it return its kept claims at once. A full sync therefore
+  waits at most about 5 seconds for the kept claims of a controller whose worker
+  runs against a healthy node, and otherwise (the controller stopped or died, or
+  its node is disconnected or broken) at most one lease, when they expire.
+  `capture_queued_work()` gives
+  up after `sync_lease_seconds + 5` seconds with `TimeoutError`, and then no
+  snapshot is sent and nothing is retired.
+
+A newer update through this controller forgets the user's backoff, and a
+successful `start(...)`, `sync_users(...)` or `flush_pending_users()` clears all
+of them (a delivery round whose send is still in flight may then hold again the
+users it sees rejected). The backoff state lives in this controller's memory,
+one entry per user, and each controller on a shared store keeps its own. While a
+full-sync fence is active, the claim of a user held for retry is returned to the
+queue for the snapshot instead of being held.
 `sync_users_chunked` sets `rejected=True` on its returned failed list for such
 node rejections; transport errors are retried as a whole.
 
@@ -268,7 +292,10 @@ storage failure.
 
 Adapters that track uncertain acknowledgements may return the affected emails
 from `ack_users`; such adapters must also provide `request_refresh(node_id,
-emails)` to durably request delivery of current application state. An optional
+emails)` to durably request delivery of current application state. A store with
+`request_refresh` should also implement `hold_users(node_id, tokens,
+retry_after)` as described above: without it, a user the node rejected is
+acknowledged and its retry is kept only in the rejecting controller's memory. An optional
 `refresh_claimed(node_id, claimed_users)` can similarly replace work delivered
 across a full-sync fence with refresh markers. Without that hook, the worker
 requeues those claims using the store's normal revision checks.
