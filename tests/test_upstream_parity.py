@@ -82,6 +82,18 @@ class FakeGit:
     def file_lines(self, head, path):
         return self.files.get(path)
 
+    def file_sequence(self, head, path):
+        return sorted(self.files[path]) if path in self.files else None
+
+    def deletions(self, sha):
+        return {
+            path: [(parity.normalise(line), None, None) for line in lines if parity.normalise(line)]
+            for path, lines in self.deleted.get(sha, {}).items()
+        }
+
+    def deletes_file(self, sha, path):
+        return False
+
 
 def make_snapshot():
     return parity.Snapshot(
@@ -292,10 +304,13 @@ class UpstreamParityTests(unittest.TestCase):
     def test_adapted_port_must_carry_the_upstream_added_lines(self):
         git = FakeGit()
         ledger = self.adapted(git)
+        entry(ledger, U_TIMEOUT)["fork_paths"] = {"bridge.py": "pkg/bridge.py"}
         git.added[F_TIMEOUT] = {"pkg/bridge.py": ["timeout  =  330"]}
         self.assertFailsWith(self.run_check(ledger=ledger, git=git), "1 line(s) upstream")
         git.added[F_TIMEOUT]["pkg/bridge.py"].append("\tretry(user)")
         self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+        entry(ledger, U_TIMEOUT).pop("fork_paths")
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "2 line(s) upstream 4444444444 added to bridge.py")
 
     def test_adapted_port_lines_of_an_empty_commit_do_not_count(self):
         git = FakeGit()
@@ -697,9 +712,13 @@ class UpstreamParityTests(unittest.TestCase):
         entry(ledger, U_TIMEOUT).update(diverged=[F_DIVERGE], divergence="the retry moved out of other.py")
         git.diffs[F_DIVERGE] = ["-retry(user)"]
         git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330"], "other.py": ["retry(user)"]}
+        git.files["other.py"] = {"retry(user)"}
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "added to bridge.py are in no non-empty fork commit")
+        entry(ledger, U_TIMEOUT)["fork_paths"] = {"bridge.py": "other.py"}
+        git.added[F_TIMEOUT] = {"other.py": ["timeout = 330", "retry(user)"]}
         git.files["other.py"] = {"timeout = 330"}
         self.assertFailsWith(self.run_check(ledger=ledger, git=git), "but absent at HEAD")
-        git.files["other.py"] = {"retry(user)"}
+        git.files["other.py"] = {"timeout = 330", "retry(user)"}
         self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
 
     def test_bj_e_diverged_lines_must_be_unique_strings_absent_at_head(self):
@@ -736,6 +755,117 @@ class UpstreamParityTests(unittest.TestCase):
         self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
         git.files.pop("legacy.py")
         self.assertFailsWith(self.run_check(ledger=ledger, git=git), "legacy.py is not at HEAD")
+
+
+class AdaptedPortOnRealGitTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.git = parity.Git(self.root)
+        self.git.run("init", "-q", "-b", "main")
+        self.git.run("config", "user.email", "t@example.test")
+        self.git.run("config", "user.name", "t")
+        self.git.run("config", "commit.gpgsign", "false")
+
+    def commit(self, files, message):
+        for name, text in files.items():
+            path = self.root / name
+            if text is None:
+                path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+        self.git.run("add", "-A")
+        self.git.run("commit", "-q", "--allow-empty", "-m", message)
+        return self.git.resolve("HEAD")
+
+    def port(self, base, upstream, fork, prepare=None):
+        self.commit(base, "base")
+        self.git.run("checkout", "-q", "-b", "up")
+        upstream_sha = self.commit(upstream, "upstream")
+        self.git.run("checkout", "-q", "main")
+        if prepare:
+            self.commit(prepare, "prepare")
+        fork_sha = self.commit(fork, f"port\n\nUpstream: {upstream_sha}")
+        return {"upstream": upstream_sha, "status": "ported", "fork": [fork_sha], "match": "adapted", "reason": "r"}
+
+    def failures(self, row):
+        report = parity.Report()
+        parity.check_ported(row, "row", self.git, self.git.resolve("main"), set(), report)
+        return report.failures
+
+    def assertFailsWith(self, failures, text):
+        self.assertTrue(any(text in failure for failure in failures), failures)
+
+    def test_bj_h3_1_a_deletion_of_a_mixed_upstream_commit_the_fork_skipped_fails(self):
+        row = self.port(
+            {"m.py": "import os\n\ndef f():\n    check_auth()\n    log()\n    return 1\n"},
+            {"m.py": "import os\n\ndef f():\n    return 1\n\ndef g():\n    return 2\n"},
+            {"m.py": "import os\n\ndef f():\n    check_auth()\n    return 1\n\ndef g():\n    return 2\n"},
+        )
+        self.assertFailsWith(self.failures(row), "1 line(s) upstream")
+        self.assertFailsWith(self.failures(row), "not listed in `kept_deleted_lines`, first 'check_auth()'")
+        row["kept_deleted_lines"] = [{"line": "  check_auth()", "reason": "the fork keeps the auth guard"}]
+        self.assertEqual(self.failures(row), [])
+        row["kept_deleted_lines"].append({"line": "log()", "reason": "stale"})
+        self.assertFailsWith(self.failures(row), "kept deleted line 'log()' is listed, but HEAD no longer keeps it")
+        row["kept_deleted_lines"] = [{"line": "check_auth()", "reason": "x"}, {"line": "never()", "reason": "x"}]
+        self.assertFailsWith(self.failures(row), "kept deleted line 'never()' is not an upstream deleted line")
+        row["kept_deleted_lines"] = [{"line": "check_auth()"}]
+        self.assertFailsWith(self.failures(row), "kept deleted line 'check_auth()' needs a `reason`")
+
+    def test_bj_h3_2_an_upstream_line_counts_only_on_its_own_path_or_a_declared_fork_path(self):
+        row = self.port(
+            {"auth.py": "def f():\n    return 1\n", "tests.py": "x = 1\n"},
+            {"auth.py": "def f():\n    require_admin()\n    return 1\n"},
+            {"tests.py": "x = 1\n    require_admin()\n"},
+        )
+        self.assertFailsWith(self.failures(row), "added to auth.py are in no non-empty fork commit on that path")
+        row["fork_paths"] = {"auth.py": "tests.py"}
+        self.assertEqual(self.failures(row), [])
+        row["fork_paths"] = {" auth.py": "tests.py"}
+        self.assertFailsWith(self.failures(row), "`fork_paths` key ' auth.py' is not a path upstream")
+        row["fork_paths"] = {"auth.py": "auth.py"}
+        self.assertFailsWith(self.failures(row), "which is not another fork path")
+
+    def test_bj_h3_2_a_renamed_fork_file_needs_its_mapping(self):
+        row = self.port(
+            {"auth.py": "def f():\n    return 1\n"},
+            {"auth.py": "def f():\n    require_admin()\n    return 1\n"},
+            {"pkg/auth.py": "def f():\n    require_admin()\n    return 1\n"},
+            prepare={"auth.py": None, "pkg/auth.py": "def f():\n    return 1\n"},
+        )
+        self.assertFailsWith(self.failures(row), "added to auth.py are in no non-empty fork commit on that path")
+        row["fork_paths"] = {"auth.py": "pkg/auth.py"}
+        self.assertEqual(self.failures(row), [])
+
+    def test_bj_h3_3_a_port_of_an_upstream_file_deletion_passes(self):
+        base = {"dead.py": "def dead():\n    return 0\n", "a.py": "x = 1\n"}
+        row = self.port(base, {"dead.py": None}, {"dead.py": None})
+        row["no_added_lines"] = "upstream only deletes dead.py"
+        self.assertEqual(self.failures(row), [])
+
+    def test_bj_h3_3_a_kept_file_that_upstream_deleted_fails(self):
+        base = {"dead.py": "def dead():\n    return 0\n", "a.py": "x = 1\n"}
+        row = self.port(base, {"dead.py": None}, {"a.py": "x = 1\ny = 2\n", "dead.py": "def dead():\n    return 0\n"})
+        row["no_added_lines"] = "upstream only deletes dead.py"
+        self.assertFailsWith(self.failures(row), "deleted from dead.py are still at HEAD")
+
+    def test_bj_h3_4_generic_deleted_lines_that_survive_elsewhere_pass(self):
+        base = {"a.py": "def f():\n    return g(\n        1,\n    )\n\ndef h():\n    return g(\n        2,\n    )\n"}
+        dropped = {"a.py": "def f():\n    return g(\n        1,\n    )\n"}
+        row = self.port(base, dropped, dropped)
+        row["no_added_lines"] = "upstream only drops h"
+        self.assertEqual(self.failures(row), [])
+
+    def test_a_deleted_line_is_kept_only_beside_an_upstream_neighbour(self):
+        old = ["a", "", "x()", "  y()", "b"]
+        contexts = parity.deletion_contexts(old, [(2, "x()"), (3, "  y()"), (1, "")])
+        self.assertEqual(contexts, [("x()", "a", "y()"), ("y()", "x()", "b")])
+        self.assertTrue(parity.kept_beside_neighbours(contexts[0], ["a", "x()", "b"]))
+        self.assertFalse(parity.kept_beside_neighbours(contexts[0], ["b", "x()", "c"]))
+        self.assertTrue(parity.kept_beside_neighbours(("only", None, None), ["z", "only"]))
 
 
 class DiffReaderTests(unittest.TestCase):

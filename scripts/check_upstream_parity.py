@@ -23,7 +23,7 @@ REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 VERSION_LINE = re.compile(r'^([+-])\s*(?:Version:\s*|__version__\s*=\s*|version\s*=\s*)"?(\d[0-9A-Za-z.+-]*)"?\s*$')
 FULL_SHA_TOKEN = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
 REVERT = re.compile(r"This reverts commit ([0-9a-f]{7,40})")
-HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 DIFF = ("--format=", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/")
 STATUSES = ("ported", "version-only", "waived", "deferred")
 COMPLETE = ("ported", "version-only", "waived")
@@ -90,11 +90,12 @@ def diff_name(name: str, prefix: str) -> str | None:
     return name[len(prefix) :] if name.startswith(prefix) else None
 
 
-def parse_diff(diff: str) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+def parse_diff_rows(diff: str) -> tuple[dict[str, list[str]], dict[str, list[tuple[int, str]]]]:
     added: dict[str, list[str]] = {}
-    deleted: dict[str, list[str]] = {}
+    deleted: dict[str, list[tuple[int, str]]] = {}
     source = target = None
     old_left = new_left = 0
+    row = 0
     for line in diff.split("\n"):
         if old_left > 0 or new_left > 0:
             if line.startswith("+") and new_left > 0:
@@ -104,10 +105,12 @@ def parse_diff(diff: str) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
             elif line.startswith("-") and old_left > 0:
                 old_left -= 1
                 if source is not None:
-                    deleted.setdefault(source, []).append(line[1:])
+                    deleted.setdefault(source, []).append((row, line[1:]))
+                row += 1
             elif line.startswith(" "):
                 old_left -= 1
                 new_left -= 1
+                row += 1
             elif not line.startswith("\\"):
                 old_left = new_left = 0
             if old_left > 0 or new_left > 0 or line.startswith(("+", "-", " ", "\\")):
@@ -121,9 +124,37 @@ def parse_diff(diff: str) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
         else:
             hunk = HUNK.match(line)
             if hunk:
-                old_left = int(hunk.group(1) if hunk.group(1) is not None else 1)
-                new_left = int(hunk.group(2) if hunk.group(2) is not None else 1)
+                old_left = int(hunk.group(2) if hunk.group(2) is not None else 1)
+                new_left = int(hunk.group(3) if hunk.group(3) is not None else 1)
+                row = max(int(hunk.group(1)) - 1, 0) if old_left else int(hunk.group(1))
     return added, deleted
+
+
+def parse_diff(diff: str) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    added, deleted = parse_diff_rows(diff)
+    return added, {path: [text for _, text in rows] for path, rows in deleted.items()}
+
+
+def deletion_contexts(old: list[str], rows: list[tuple[int, str]]) -> list[tuple[str, str | None, str | None]]:
+    solid = [(index, normalise(line)) for index, line in enumerate(old) if normalise(line)]
+    contexts = []
+    for row, text in rows:
+        line = normalise(text)
+        if not line:
+            continue
+        before = [value for index, value in solid if index < row]
+        after = [value for index, value in solid if index > row]
+        contexts.append((line, before[-1] if before else None, after[0] if after else None))
+    return contexts
+
+
+def kept_beside_neighbours(context: tuple[str, str | None, str | None], sequence: list[str]) -> bool:
+    line, before, after = context
+    solid = [normalise(value) for value in sequence if normalise(value)]
+    if before is None and after is None:
+        return line in solid
+    pairs = set(zip(solid, solid[1:]))
+    return (before is not None and (before, line) in pairs) or (after is not None and (line, after) in pairs)
 
 
 def version_key(name: str) -> tuple[int, ...] | None:
@@ -243,10 +274,24 @@ class Git:
         return self.changes(sha)[1]
 
     def file_lines(self, head: str, path: str) -> set[str] | None:
-        result = self.run("show", f"{head}:{path}", check=False)
-        if result.returncode != 0:
+        sequence = self.file_sequence(head, path)
+        return None if sequence is None else {line.strip() for line in sequence}
+
+    def file_sequence(self, ref: str, path: str) -> list[str] | None:
+        result = self.run("show", f"{ref}:{path}", check=False)
+        if result.returncode != 0 or self.run("cat-file", "-t", f"{ref}:{path}", check=False).stdout.strip() != "blob":
             return None
-        return {line.strip() for line in result.stdout.split("\n")}
+        return result.stdout.split("\n")
+
+    def deletions(self, sha: str) -> dict[str, list[tuple[str, str | None, str | None]]]:
+        diff = self.run("show", *DIFF, "--diff-merges=off", "--no-renames", "--unified=0", sha).stdout
+        return {
+            path: deletion_contexts(self.file_sequence(f"{sha}^", path) or [], rows)
+            for path, rows in parse_diff_rows(diff)[1].items()
+        }
+
+    def deletes_file(self, sha: str, path: str) -> bool:
+        return self.file_sequence(f"{sha}^", path) is not None and self.file_sequence(sha, path) is None
 
     def rev_list(self, include: list[str], exclude: list[str]) -> list[Commit]:
         args = ["log", "--format=%H%x09%s", *include]
@@ -432,98 +477,146 @@ def lines_at_head(paths: set[str], git: Git, head: str) -> set[str]:
     return {normalise(line) for path in sorted(paths) for line in git.file_lines(head, path) or set()}
 
 
-def diverged_items(entry: dict, label: str, report: Report) -> list:
-    items = entry.get("diverged_lines", [])
-    if isinstance(items, list):
-        return items
-    report.fail(f"{label}: `diverged_lines` must be a list of {{line, reason}} tables, got {type(items).__name__}")
-    return []
+def listed_lines(entry: dict, field: str, noun: str, label: str, report: Report) -> list[str]:
+    items = entry.get(field, [])
+    if not isinstance(items, list):
+        report.fail(f"{label}: `{field}` must be a list of {{line, reason}} tables, got {type(items).__name__}")
+        return []
+    lines: list[str] = []
+    for item in items:
+        raw = item.get("line") if isinstance(item, dict) else None
+        if not isinstance(raw, str):
+            report.fail(f"{label}: a `{field}` item needs a string `line`, got {raw!r}")
+            continue
+        line = normalise(raw)
+        if not line:
+            report.fail(f"{label}: a `{field}` item needs a non-empty `line`")
+            continue
+        if not str(item.get("reason", "")).strip():
+            report.fail(f"{label}: {noun} {line[:80]!r} needs a `reason`")
+            continue
+        if line in lines:
+            report.fail(f"{label}: {noun} {line[:80]!r} is listed twice in `{field}`")
+            continue
+        lines.append(line)
+    return lines
 
 
-def check_no_added_lines(entry: dict, label: str, carriers: list[str], git: Git, head: str, report: Report) -> None:
+def fork_paths(entry: dict, label: str, git: Git, report: Report) -> dict[str, str]:
+    mapping = entry.get("fork_paths", {})
+    if not isinstance(mapping, dict):
+        report.fail(f"{label}: `fork_paths` must be a table of upstream path = fork path, got {type(mapping).__name__}")
+        return {}
+    changed = git.changed_paths(entry["upstream"])
+    valid: dict[str, str] = {}
+    for source, target in sorted(mapping.items()):
+        if source not in changed:
+            report.fail(f"{label}: `fork_paths` key {source!r} is not a path upstream {entry['upstream'][:10]} changes")
+        elif not isinstance(target, str) or not target or target != target.strip() or target == source:
+            report.fail(f"{label}: `fork_paths` maps {source!r} to {target!r}, which is not another fork path")
+        else:
+            valid[source] = target
+    return valid
+
+
+def check_deleted_lines(entry: dict, label: str, paths: dict[str, str], git: Git, head: str, report: Report) -> None:
+    upstream_sha = entry["upstream"]
+    listed = listed_lines(entry, "kept_deleted_lines", "kept deleted line", label, report)
+    deletions = git.deletions(upstream_sha)
+    deleted = {context[0] for contexts in deletions.values() for context in contexts}
+    kept_anywhere: set[str] = set()
+    for path, contexts in sorted(deletions.items()):
+        target = paths.get(path, path)
+        sequence = git.file_sequence(head, target)
+        if sequence is None:
+            if not git.deletes_file(upstream_sha, path):
+                report.fail(
+                    f"{label}: upstream {upstream_sha[:10]} deletes lines from {path}, but {target} is not at HEAD;"
+                    " map it in `fork_paths` if the fork keeps it elsewhere"
+                )
+            continue
+        kept = [context[0] for context in contexts if kept_beside_neighbours(context, sequence)]
+        kept_anywhere.update(kept)
+        unlisted = [line for line in kept if line not in listed]
+        if unlisted:
+            report.fail(
+                f"{label}: {len(unlisted)} line(s) upstream {upstream_sha[:10]} deleted from {path} are still"
+                f" at HEAD in {target} beside an upstream neighbour and not listed in `kept_deleted_lines`,"
+                f" first {unlisted[0][:100]!r}"
+            )
+    for line in listed:
+        if line not in deleted:
+            report.fail(f"{label}: kept deleted line {line[:80]!r} is not an upstream deleted line")
+        elif line not in kept_anywhere:
+            report.fail(f"{label}: kept deleted line {line[:80]!r} is listed, but HEAD no longer keeps it")
+
+
+def check_no_added_lines(
+    entry: dict, label: str, carriers: list[str], paths: dict[str, str], git: Git, report: Report
+) -> None:
     upstream_sha = entry["upstream"]
     if not str(entry.get("no_added_lines", "")).strip():
         report.fail(
             f"{label}: upstream {upstream_sha[:10]} adds no lines, so an adapted port of it needs a"
             " `no_added_lines` text saying how the fork carries it"
         )
-    paths = git.changed_paths(upstream_sha)
-    if not paths:
+    changed = git.changed_paths(upstream_sha)
+    if not changed:
         report.fail(f"{label}: upstream {upstream_sha[:10]} changes no file, so there is nothing to port; waive it")
         return
     touched = set().union(*(git.changed_paths(sha) for sha in carriers))
-    untouched = sorted(paths - touched)
+    untouched = sorted(path for path in changed if paths.get(path, path) not in touched)
     if untouched:
         report.fail(f"{label}: upstream {upstream_sha[:10]} changes {untouched[0]}, which no fork commit touches")
-    for path, lines in sorted(git.deleted_lines(upstream_sha).items()):
-        at_head = git.file_lines(head, path)
-        if at_head is None:
-            report.fail(f"{label}: upstream {upstream_sha[:10]} deletes lines from {path}, but {path} is not at HEAD")
-            continue
-        present = {normalise(line) for line in at_head}
-        kept = [line for line in lines if normalise(line) and normalise(line) in present]
-        if kept:
-            report.fail(
-                f"{label}: {len(kept)} line(s) upstream {upstream_sha[:10]} deleted from {path} are still"
-                f" at HEAD, first {kept[0].strip()[:100]!r}"
-            )
 
 
 def check_adapted_lines(entry: dict, label: str, fork: list[str], git: Git, head: str, report: Report) -> None:
-    items = diverged_items(entry, label, report)
+    items = listed_lines(entry, "diverged_lines", "diverged line", label, report)
+    paths = fork_paths(entry, label, git, report)
     carriers = [sha for sha in fork if not git.is_empty(sha)]
     if not carriers:
         report.fail(f"{label}: every fork commit is empty, so none carries upstream {entry['upstream'][:10]}'s lines")
         return
-    carried_by_path = {}
+    check_deleted_lines(entry, label, paths, git, head, report)
+    carried_by_path: dict[str, set[str]] = {}
     for sha in carriers:
         for path, lines in git.added_lines(sha).items():
             carried_by_path.setdefault(path, set()).update(normalise(line) for line in lines)
-    upstream_added = git.added_lines(entry["upstream"])
-    upstream = {normalise(line) for lines in upstream_added.values() for line in lines if line.strip()}
-    if not upstream:
-        check_no_added_lines(entry, label, carriers, git, head, report)
+    wanted: dict[str, set[str]] = {}
+    for path, lines in git.added_lines(entry["upstream"]).items():
+        solid = {normalise(line) for line in lines if line.strip()}
+        if solid:
+            wanted.setdefault(paths.get(path, path), set()).update(solid)
+    if not wanted:
+        check_no_added_lines(entry, label, carriers, paths, git, report)
         return
-    carried = set().union(*carried_by_path.values()) if carried_by_path else set()
-    covered = set().union(
-        *(lines & lines_at_head({path}, git, head) for path, lines in carried_by_path.items())
-    )
-    present = lines_at_head(set(carried_by_path) | set(upstream_added), git, head)
+    upstream = set().union(*wanted.values())
+    at_head = {path: lines_at_head({path}, git, head) for path in wanted}
+    carried = {path: carried_by_path.get(path, set()) & lines for path, lines in wanted.items()}
+    covered = {path: carried[path] & at_head[path] for path in wanted}
     excused: set[str] = set()
-    for item in items:
-        raw = item.get("line") if isinstance(item, dict) else None
-        if not isinstance(raw, str):
-            report.fail(f"{label}: a `diverged_lines` item needs a string `line`, got {raw!r}")
-            continue
-        line = normalise(raw)
-        if not line:
-            report.fail(f"{label}: a `diverged_lines` item needs a non-empty `line`")
-            continue
-        if not str(item.get("reason", "")).strip():
-            report.fail(f"{label}: diverged line {line[:80]!r} needs a `reason`")
-            continue
-        if line in excused:
-            report.fail(f"{label}: diverged line {line[:80]!r} is listed twice in `diverged_lines`")
-            continue
+    for line in items:
+        homes = [path for path in sorted(wanted) if line in wanted[path]]
         if line not in upstream:
             report.fail(f"{label}: diverged line {line[:80]!r} is not an upstream added line")
-        elif line in covered:
+        elif all(line in covered[path] for path in homes):
             report.fail(f"{label}: diverged line {line[:80]!r} is listed, but the fork commits carry it")
-        elif line in present and line not in carried:
+        elif any(line in at_head[path] and line not in carried[path] for path in homes):
             report.fail(f"{label}: diverged line {line[:80]!r} is at HEAD but no fork commit carries it; name that commit")
         excused.add(line)
-    gone = sorted((upstream & carried) - covered - excused)
-    if gone:
-        report.fail(
-            f"{label}: {len(gone)} line(s) upstream {entry['upstream'][:10]} added are carried by a fork commit"
-            f" but absent at HEAD and not listed in `diverged_lines`, first {gone[0][:100]!r}"
-        )
-    missing = sorted(upstream - carried - excused)
-    if missing:
-        report.fail(
-            f"{label}: {len(missing)} line(s) upstream {entry['upstream'][:10]} added are in no non-empty fork"
-            f" commit and not listed in `diverged_lines`, first {missing[0][:100]!r}"
-        )
+    for path in sorted(wanted):
+        gone = sorted(carried[path] - covered[path] - excused)
+        if gone:
+            report.fail(
+                f"{label}: {len(gone)} line(s) upstream {entry['upstream'][:10]} added to {path} are carried by a"
+                f" fork commit but absent at HEAD and not listed in `diverged_lines`, first {gone[0][:100]!r}"
+            )
+        missing = sorted(wanted[path] - carried[path] - excused)
+        if missing:
+            report.fail(
+                f"{label}: {len(missing)} line(s) upstream {entry['upstream'][:10]} added to {path} are in no"
+                f" non-empty fork commit on that path and not listed in `diverged_lines`, first {missing[0][:100]!r}"
+            )
 
 
 def check_still_applied(fork: list[str], removed: set[str], label: str, git: Git, head: str, report: Report) -> None:
@@ -606,8 +699,9 @@ def check_entry(
     check_divergence(entry, label, git, head, report)
     if "diverged_lines" in entry and (status != "ported" or entry.get("match") != "adapted"):
         report.fail(f"{label}: `diverged_lines` is only allowed on a ported row with match = \"adapted\"")
-    if "no_added_lines" in entry and (status != "ported" or entry.get("match") != "adapted"):
-        report.fail(f"{label}: `no_added_lines` is only allowed on a ported row with match = \"adapted\"")
+    for field in ("no_added_lines", "kept_deleted_lines", "fork_paths"):
+        if field in entry and (status != "ported" or entry.get("match") != "adapted"):
+            report.fail(f"{label}: `{field}` is only allowed on a ported row with match = \"adapted\"")
     if status == "ported":
         check_ported(entry, label, git, head, removed, report)
     elif status == "version-only":

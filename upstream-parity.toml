@@ -138,6 +138,10 @@ diverged_lines = [
     { line = "user's backoff, and a successful `start(...)`, `sync_users(...)` or", reason = "removed by dd7906adb5 (docs: the store contract for held, refresh and lease retries) as part of the divergence above" },
     { line = "written by another producer. A newer update through this controller forgets the", reason = "removed by 448eb044d2 (fix(sync): a held retry never replaces a newer change another worker queued or delivered) as part of the divergence above" },
 ]
+kept_deleted_lines = [
+    { line = "return await self._handle_grpc_request(", reason = "ported: grpclib.py sync_users now assigns response, calls _clear_rejected_users and returns it, as a01bdbb does; the line stays only in add_backend, remove_backend and the routing methods, which a01bdbb does not touch, beside the same generic neighbour `async with self._node_lock:`" },
+    { line = "return await self._make_request(", reason = "ported: rest.py sync_users now assigns response, calls _clear_rejected_users and returns it, as a01bdbb does; the line stays only in add_backend, remove_backend and the routing methods, which a01bdbb does not touch, beside the same generic neighbour `async with self._node_lock:`" },
+]
 
 [[commit]]
 upstream = "f892a5ccb6cff597ec233854dea7abc46981d1bb"
