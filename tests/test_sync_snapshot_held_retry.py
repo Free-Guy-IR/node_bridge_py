@@ -744,6 +744,80 @@ class SnapshotRetireFailureTests(unittest.IsolatedAsyncioTestCase):
                 await close_all(self.nodes)
 
 
+class PerTokenRetireStores:
+    class Held(InMemoryUserSyncStore):
+        def __init__(self):
+            super().__init__()
+            self.retire_calls = []
+
+        async def retire_held(self, node_id, tokens):
+            self.retire_calls.append(len(tokens))
+            await asyncio.sleep(0.2 * len(tokens))
+            await super().retire_held(node_id, tokens)
+
+    class Lease(LeaseOnlyStore):
+        def __init__(self):
+            super().__init__()
+            self.retire_calls = []
+
+        async def ack_users(self, node_id, tokens):
+            self.retire_calls.append(len(tokens))
+            await asyncio.sleep(0.2 * len(tokens))
+            return await super().ack_users(node_id, tokens)
+
+
+class RetireBatchTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.nodes = []
+
+    async def asyncTearDown(self):
+        await close_all(self.nodes)
+
+    async def test_a_snapshot_retires_many_retries_a_batch_per_store_call_and_the_node_keeps_syncing(self):
+        for kind, factory in (("held", PerTokenRetireStores.Held), ("lease", PerTokenRetireStores.Lease)):
+            with self.subTest(store=kind):
+                store = factory()
+                node = RecordingNode(
+                    user_sync_store=store,
+                    worker_id="A",
+                    sync_lease_seconds=60.0,
+                    sync_batch_size=2,
+                    internal_timeout=1,
+                )
+                node._sync_retry_delays = (30.0, 60.0, 300.0)
+                self.nodes.append(node)
+                refused = {f"r{i}" for i in range(8)}
+                on_node = {}
+
+                async def send(users, **kwargs):
+                    if any(user.email in refused for user in users):
+                        return FailedUsers(users, rejected=True, detail="bad inbound")
+                    for user in users:
+                        on_node[user.email] = list(user.inbounds)
+                    return []
+
+                node.sync_users_chunked = send
+                await node.update_users(
+                    [User(email=email, inbounds=["v1"]) for email in sorted(refused | {f"a{i}" for i in range(8)})]
+                )
+                await node.connect("0.2.0", "1.0.0")
+                await eventually(
+                    lambda: refused <= {e for e, r in node._sync_retries.items() if r.queued_at is None}, timeout=20
+                )
+                await asyncio.sleep(0.5)
+                refused.clear()
+                failures = node._user_sync_failure_count
+                store.retire_calls.clear()
+                await node._clear_rejected_users()
+                await node.update_user(User(email="y", inbounds=["y1"]))
+                await eventually(lambda: on_node.get("y") == ["y1"], timeout=10)
+                self.assertEqual(node._sync_unretired, [])
+                self.assertLessEqual(max(store.retire_calls), 2, store.retire_calls)
+                self.assertEqual(node._user_sync_failure_count, failures)
+                self.assertFalse(node.requires_hard_reset())
+                await close_all(self.nodes)
+
+
 class HoldCallsPerRoundTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.nodes = []

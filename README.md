@@ -174,7 +174,9 @@ depends on what the store provides:
   refresh or lease store, and each controller built on it logs one warning
   naming the missing method). The controller
   releases the claim with `hold_users` instead of `ack_users`, with
-  `retry_after` set to the user's backoff in seconds. For each token it still
+  `retry_after` set to the user's backoff in seconds; the users one round
+  holds whose backoffs end within 1 second of each other share one call, held
+  for the longest of their backoffs. For each token it still
   leases, the store must atomically release the claim and, when the queued entry
   still has the claimed revision, keep that entry queued at the same revision
   but not claimable until `retry_after` seconds have passed; a newer queued
@@ -245,7 +247,11 @@ controller's retries are dropped from the store when still at the rejected
 revision (`retire_held`, or `ack_users` of a kept claim whose lease is still
 live; a refresh store has nothing queued for them), so this controller's
 retries do not send a pre-snapshot payload over the snapshot; a newer revision
-stays queued. A direct `start(...)` or `sync_users(...)` does not touch the
+stays queued. They are dropped `sync_batch_size` tokens per store call, each
+call within `internal_timeout`. Tokens a failed call did not drop are tried
+again at the next such snapshot and at each wake of the worker before it
+claims anything, so a claim never sends them over the snapshot; a failure
+there fails that round. A direct `start(...)` or `sync_users(...)` does not touch the
 retries of other controllers on the store: one of them can still send its
 held payload after the snapshot. Use `sync_users_from_source(...)`, whose
 fence and capture cover every controller's queued and held work, when several

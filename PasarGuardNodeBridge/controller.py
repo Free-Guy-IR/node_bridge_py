@@ -984,15 +984,15 @@ class Controller:
 
     async def _retire_unretired(self) -> None:
         tokens = list(self._sync_unretired)
-        if not tokens:
-            return
-        async with asyncio.timeout(self._internal_timeout):
-            if self._retry_mode() == "hold":
-                await self._user_sync_store.retire_held(self.node_id, tokens)
-            else:
-                await self._user_sync_store.ack_users(self.node_id, tokens)
-        retired = set(tokens)
-        self._sync_unretired = [token for token in self._sync_unretired if token not in retired]
+        size = self._sync_batch_size
+        for chunk in [tokens[start : start + size] for start in range(0, len(tokens), size)]:
+            async with asyncio.timeout(self._internal_timeout):
+                if self._retry_mode() == "hold":
+                    await self._user_sync_store.retire_held(self.node_id, chunk)
+                else:
+                    await self._user_sync_store.ack_users(self.node_id, chunk)
+            retired = set(chunk)
+            self._sync_unretired = [token for token in self._sync_unretired if token not in retired]
 
     def _mark_claimed_back(self, claimed: list[ClaimedUser]) -> None:
         if not claimed or self._retry_mode() != "hold":
