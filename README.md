@@ -171,7 +171,8 @@ depends on what the store provides:
 - Held retry, when the store has `hold_users(node_id, tokens, retry_after)` and
   `retire_held(node_id, tokens)` (the default store has both, see
   `HeldRetryUserSyncStoreProtocol`; a store with only one of them is used as a
-  refresh or lease store). The controller
+  refresh or lease store, and each controller built on it logs one warning
+  naming the missing method). The controller
   releases the claim with `hold_users` instead of `ack_users`, with
   `retry_after` set to the user's backoff in seconds. For each token it still
   leases, the store must atomically release the claim and, when the queued entry
@@ -218,7 +219,11 @@ depends on what the store provides:
   expired, which happens when the backoff is longer than `sync_lease_seconds`,
   is not dropped and its payload may still be sent after the snapshot), and an
   active full-sync fence makes it return all its kept claims at its next wake,
-  `sync_batch_size` per store call. A full sync
+  `sync_batch_size` per store call. A store call that fails or takes longer
+  than `internal_timeout` while returning kept claims to an active fence is
+  logged and tried again at a later wake, with the usual back-off, but it is
+  not counted as a failed round: it is storage slowness, not the node, so it
+  never brings a healthy node closer to a hard reset. A full sync
   therefore waits at most about 5 seconds for the kept claims of a controller
   whose worker runs against a healthy node, and otherwise (the controller
   stopped or died, or its node is disconnected or broken) at most one lease,
@@ -258,7 +263,9 @@ delivery fails for any reason other than a node rejection (transport, a timeout
 of the send itself, the node's core not running or another node error) or the
 round raises an error (storage, resolver, or its deadline passing before its
 first send ends); a later send cut by the round's deadline does not fail the
-round, its users are only sent again in the next round. To still flag a node
+round, its users are only sent again in the next round, and a lease store
+failing to take back kept claims under an active full-sync fence (see Lease
+above) does not fail it either. To still flag a node
 whose backend refuses every user, each controller counts the users rejected in
 its rounds that accept nobody and do not fail, except users it is already
 retrying after the node rejected them on their own; a user that another

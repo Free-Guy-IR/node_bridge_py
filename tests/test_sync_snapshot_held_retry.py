@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import logging
 import random
 import time
 import unittest
@@ -16,6 +18,7 @@ from tests.test_user_sync import RecordingNode, eventually
 
 class LeaseOnlyStore(InMemoryUserSyncStore):
     hold_users = None
+    retire_held = None
     enqueue_users_if_absent = None
 
 
@@ -619,6 +622,58 @@ class LeaseModeRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(max(calls), 4)
         self.assertEqual(keeper._user_sync_failure_count, failures)
 
+    async def test_a_fenced_requeue_slower_than_the_internal_timeout_never_counts_toward_a_hard_reset(self):
+        calls = []
+
+        class SlowRequeueStore(LeaseOnlyStore):
+            async def requeue_users(self, node_id, claimed_users):
+                calls.append(len(claimed_users))
+                await asyncio.sleep(1.3)
+                await super().requeue_users(node_id, claimed_users)
+
+        store = SlowRequeueStore()
+        refuse = {"x"}
+
+        def worker(name):
+            node = RecordingNode(user_sync_store=store, worker_id=name, sync_lease_seconds=60.0, internal_timeout=1)
+            node._sync_retry_delays = (60.0, 60.0, 300.0)
+            node._worker_idle_timeout = 0.3
+            self.nodes.append(node)
+
+            async def send(users, **kwargs):
+                if any(user.email in refuse for user in users):
+                    return FailedUsers(users, rejected=True, detail="proxy is not a UserManager")
+                return []
+
+            async def snapshot(users, **kwargs):
+                return Empty()
+
+            node.sync_users_chunked = send
+            node.sync_users = snapshot
+            return node
+
+        keeper = worker("A")
+        await keeper.update_user(User(email="x", inbounds=["v1"]))
+        await keeper.connect("0.2.0", "1.0.0")
+        await eventually(lambda: "x" in keeper._sync_retries and keeper._sync_retries["x"].queued_at is None)
+        failures = keeper._user_sync_failure_count
+        other = worker("B")
+        refuse.clear()
+
+        async def load():
+            return [User(email="x", inbounds=["v1"])]
+
+        fence = asyncio.create_task(other.sync_users_from_source(load))
+        try:
+            await eventually(lambda: len(calls) >= 2, timeout=15)
+            await asyncio.sleep(1.2)
+            self.assertEqual(keeper._user_sync_failure_count, failures)
+            self.assertFalse(keeper.requires_hard_reset())
+        finally:
+            fence.cancel()
+            with contextlib.suppress(BaseException):
+                await fence
+
 
 class FailingRetireStores:
     class Held(InMemoryUserSyncStore):
@@ -725,6 +780,29 @@ class HoldCallsPerRoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [8])
         self.assertLessEqual(len(sends), 15, sends)
         self.assertEqual(node._user_sync_failure_count, 0)
+
+
+class PartialHoldContractTests(unittest.TestCase):
+    def test_a_store_with_only_part_of_the_hold_contract_logs_one_warning_naming_the_missing_method(self):
+        class HoldOnly(InMemoryUserSyncStore):
+            retire_held = None
+
+        class RetireOnly(InMemoryUserSyncStore):
+            hold_users = None
+
+        for store, missing in ((HoldOnly(), "retire_held"), (RetireOnly(), "hold_users")):
+            with self.subTest(missing=missing):
+                with self.assertLogs("sync-test", level=logging.WARNING) as logs:
+                    RecordingNode(user_sync_store=store, worker_id="A")
+                self.assertEqual(len(logs.records), 1, logs.output)
+                self.assertIn(missing, logs.records[0].getMessage())
+                self.assertIn(type(store).__name__, logs.records[0].getMessage())
+
+    def test_a_store_with_the_whole_hold_contract_or_none_of_it_logs_no_warning(self):
+        for kind, factory in STORES.items():
+            with self.subTest(store=kind):
+                with self.assertNoLogs("sync-test", level=logging.WARNING):
+                    RecordingNode(user_sync_store=factory(), worker_id="A")
 
 
 def slow_enqueue_reply(base):

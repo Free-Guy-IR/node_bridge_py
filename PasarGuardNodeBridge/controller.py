@@ -100,6 +100,10 @@ class _Delivery(list):
         self.systemic = list(systemic)
 
 
+class _FencedRequeueError(Exception):
+    pass
+
+
 @dataclass(slots=True)
 class _RejectedUser:
     """Backoff of a user the node rejected; the retry itself goes through the queue.
@@ -232,6 +236,15 @@ class Controller:
 
         # Lazy worker sync mechanism
         self._user_sync_store = user_sync_store if user_sync_store is not None else get_default_user_sync_store()
+        hold_contract = [
+            method for method in ("hold_users", "retire_held") if callable(getattr(self._user_sync_store, method, None))
+        ]
+        if len(hold_contract) == 1:
+            missing = "retire_held" if hold_contract == ["hold_users"] else "hold_users"
+            self.logger.warning(
+                f"[{self.name}] User sync store {type(self._user_sync_store).__name__} has {hold_contract[0]} "
+                f"but not {missing}: rejected users are retried in {self._retry_mode()} mode, not held in the store"
+            )
         self._sync_worker_task: asyncio.Task | None = None
         self._work_available = asyncio.Event()
         self._worker_idle_timeout = 5.0  # seconds before worker exits
@@ -1042,13 +1055,20 @@ class Controller:
         due.sort(key=lambda entry: entry.attempts > 0)
         size = self._sync_batch_size
         for chunk in [due[start : start + size] for start in range(0, len(due), size)] if fenced else [due[:size]]:
-            async with asyncio.timeout(self._internal_timeout):
-                if mode == "refresh":
-                    await self._user_sync_store.request_refresh(self.node_id, [entry.user.email for entry in chunk])
-                else:
-                    await self._user_sync_store.requeue_users(
-                        self.node_id, [ClaimedUser(entry.token, entry.user) for entry in chunk]
-                    )
+            try:
+                async with asyncio.timeout(self._internal_timeout):
+                    if mode == "refresh":
+                        await self._user_sync_store.request_refresh(self.node_id, [entry.user.email for entry in chunk])
+                    else:
+                        await self._user_sync_store.requeue_users(
+                            self.node_id, [ClaimedUser(entry.token, entry.user) for entry in chunk]
+                        )
+            except Exception as exc:
+                if not fenced:
+                    raise
+                raise _FencedRequeueError(
+                    f"returning kept claims to a full sync: {type(exc).__name__}: {exc!s}"
+                ) from exc
             for entry in chunk:
                 entry.queued_at = now
             self._work_available.set()
@@ -1149,7 +1169,8 @@ class Controller:
                         async with asyncio.timeout(self._internal_timeout):
                             await self._requeue_claimed_users(claimed)
                     claimed = []
-                    await self._increment_user_sync_failure()
+                    if not isinstance(exc, _FencedRequeueError):
+                        await self._increment_user_sync_failure()
                     await asyncio.sleep(retry_delay)
                     retry_delay = min(retry_delay * 2, 30.0)
         finally:
