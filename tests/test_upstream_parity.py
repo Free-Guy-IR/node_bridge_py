@@ -38,6 +38,8 @@ class FakeGit:
         self.diffs = {U_BUMP2: V_LINES, U_BUMP3: V3_LINES}
         self.reverts = {}
         self.added = {}
+        self.deleted = {}
+        self.paths = {}
         self.files = {}
 
     def is_shallow(self):
@@ -66,6 +68,14 @@ class FakeGit:
 
     def added_lines(self, sha):
         return self.added.get(sha, {})
+
+    def deleted_lines(self, sha):
+        return self.deleted.get(sha, {})
+
+    def changed_paths(self, sha):
+        if sha in self.paths:
+            return set(self.paths[sha])
+        return set(self.added.get(sha, {})) | set(self.deleted.get(sha, {}))
 
     def file_lines(self, head, path):
         return self.files.get(path)
@@ -211,6 +221,8 @@ class UpstreamParityTests(unittest.TestCase):
         item["reason"] = "rebased onto the fork's heartbeat"
         git = FakeGit()
         git.patch_ids[F_TIMEOUT] = "p-other"
+        git.added[U_TIMEOUT] = git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330"]}
+        git.files["bridge.py"] = {"timeout = 330"}
         self.assertFailsWith(self.run_check(ledger=ledger, git=git), "cites the full upstream SHA")
         git.messages[F_TIMEOUT] = f"fix: timeout\n\nUpstream {U_TIMEOUT}, adapted.\n"
         self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
@@ -308,6 +320,60 @@ class UpstreamParityTests(unittest.TestCase):
         self.assertFailsWith(self.run_check(ledger=ledger, git=git), "the fork commits carry it")
         item["diverged_lines"] = [{"line": "never = upstream", "reason": "stale"}]
         self.assertFailsWith(self.run_check(ledger=ledger, git=git), "is not an upstream added line")
+
+    def test_adapted_port_whose_line_one_fork_commit_adds_and_another_deletes_fails(self):
+        git = FakeGit()
+        ledger = self.adapted(git)
+        entry(ledger, U_TIMEOUT)["fork"] = [F_TIMEOUT, F_DIVERGE]
+        git.messages[F_DIVERGE] = "fix: drop the retry\n"
+        git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330", "retry(user)"]}
+        git.diffs[F_DIVERGE] = ["-retry(user)"]
+        git.deleted[F_DIVERGE] = {"bridge.py": ["retry(user)"]}
+        git.files["bridge.py"] = {"timeout = 330"}
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "but absent at HEAD")
+        entry(ledger, U_TIMEOUT)["diverged_lines"] = [{"line": "retry(user)", "reason": "the store holds retries"}]
+        self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+        git.files["bridge.py"] = {"timeout = 330", "retry(user)"}
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "the fork commits carry it")
+
+    def test_diverged_lines_that_is_not_a_list_fails_cleanly(self):
+        git = FakeGit()
+        ledger = self.adapted(git)
+        git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330", "retry(user)"]}
+        for value in (5, {"line": "retry(user)", "reason": "r"}, "retry(user)"):
+            entry(ledger, U_TIMEOUT)["diverged_lines"] = value
+            self.assertFailsWith(self.run_check(ledger=ledger, git=git), "`diverged_lines` must be a list")
+
+    def test_diverged_lines_on_a_row_that_is_not_adapted_fails(self):
+        ledger = make_ledger()
+        entry(ledger, U_SYNC)["diverged_lines"] = []
+        entry(ledger, U_MASQUE)["diverged_lines"] = [{"line": "x", "reason": "r"}]
+        entry(ledger, U_BUMP3)["no_added_lines"] = "bump"
+        report = self.run_check(ledger=ledger)
+        self.assertFailsWith(report, "v0.9.2 1111111111 'fix sync': `diverged_lines` is only allowed")
+        self.assertFailsWith(report, "v0.9.3 3333333333 'feat masque': `diverged_lines` is only allowed")
+        self.assertFailsWith(report, "v0.9.3 5555555555 'bump to v0.9.3': `no_added_lines` is only allowed")
+
+    def test_adapted_port_of_an_upstream_commit_that_adds_no_lines(self):
+        git = FakeGit()
+        ledger = self.adapted(git)
+        item = entry(ledger, U_TIMEOUT)
+        git.added[U_TIMEOUT] = {}
+        git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330"]}
+        git.deleted[U_TIMEOUT] = {"bridge.py": ["    legacy(user)", ""]}
+        git.files["bridge.py"] = {"timeout = 330", "legacy(user)"}
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "needs a `no_added_lines` text")
+        item["no_added_lines"] = "upstream only deletes the legacy call"
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "are still at HEAD")
+        git.files["bridge.py"] = {"timeout = 330"}
+        self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+        git.deleted[U_TIMEOUT] = {}
+        git.paths[U_TIMEOUT] = {"logo.png"}
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "changes logo.png, which no fork commit touches")
+        git.paths[F_TIMEOUT] = {"bridge.py", "logo.png"}
+        self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+        git.paths[U_TIMEOUT] = set()
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "changes no file, so there is nothing to port")
 
     def test_port_whose_lines_are_gone_at_head_fails(self):
         git = FakeGit()
@@ -549,6 +615,65 @@ class UpstreamParityTests(unittest.TestCase):
             self.assertEqual(git.diff_lines(moved), [])
             self.assertFalse(git.is_empty(moved))
             self.assertEqual(git.added_lines(moved), {"store.py": ["push(u)"]})
+
+    def test_parse_diff_tracks_hunks_so_content_lines_that_look_like_headers_count(self):
+        diff = "\n".join(
+            [
+                "diff --git a/x.py b/x.py",
+                "--- a/x.py",
+                "+++ b/x.py",
+                "@@ -1,2 +1,3 @@",
+                "--- old",
+                "-keep",
+                "+++ new",
+                "++ plus",
+                "+x = 1",
+                "\\ No newline at end of file",
+                "diff --git a/y.py b/y.py",
+                "new file mode 100644",
+                "--- /dev/null",
+                "+++ b/y.py",
+                "@@ -0,0 +1 @@",
+                "+y = 2",
+                "diff --git a/z.py b/z.py",
+                "deleted file mode 100644",
+                "--- a/z.py",
+                "+++ /dev/null",
+                "@@ -1 +0,0 @@",
+                "-z = 3",
+            ]
+        )
+        added, deleted = parity.parse_diff(diff)
+        self.assertEqual(added, {"x.py": ["++ new", "+ plus", "x = 1"], "y.py": ["y = 2"]})
+        self.assertEqual(deleted, {"x.py": ["-- old", "keep"], "z.py": ["z = 3"]})
+
+    def test_git_diff_ignores_prefix_and_colour_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            git = parity.Git(root)
+            git.run("init", "-q", "-b", "main")
+            git.run("config", "user.email", "t@example.test")
+            git.run("config", "user.name", "t")
+            (root / "x.py").write_text("-- old\nkeep\n")
+            git.run("add", "x.py")
+            git.run("commit", "-q", "-m", "base")
+            (root / "x.py").write_text("++ new\nkeep\n")
+            git.run("commit", "-q", "-am", "change")
+            change = git.resolve("HEAD")
+            for key, value in (
+                ("diff.noprefix", "true"),
+                ("diff.srcPrefix", "s/"),
+                ("diff.dstPrefix", "d/"),
+                ("diff.mnemonicPrefix", "true"),
+                ("color.ui", "always"),
+                ("color.diff", "always"),
+                ("diff.renames", "false"),
+            ):
+                git.run("config", key, value)
+                self.assertEqual(git.added_lines(change), {"x.py": ["++ new"]}, key)
+                self.assertEqual(git.deleted_lines(change), {"x.py": ["-- old"]}, key)
+                self.assertEqual(git.diff_lines(change), ["--- old", "+++ new"], key)
+                self.assertEqual(git.changed_paths(change), {"x.py"}, key)
 
     def test_repository_ledger_is_well_formed(self):
         with open(parity.LEDGER, "rb") as handle:
