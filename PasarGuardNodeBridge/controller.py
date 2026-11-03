@@ -378,11 +378,13 @@ class Controller:
         self._updated_in_round.update(emails)
         replaced = [entry for email in emails if (entry := self._sync_retries.pop(email, None)) is not None]
         await self._user_sync_store.enqueue_users(self.node_id, users)
-        self._updated_in_round.update(emails)
-        replaced += [entry for email in emails if (entry := self._sync_retries.pop(email, None)) is not None]
+        lease = self._retry_mode() == "lease"
+        if lease:
+            self._updated_in_round.update(emails)
+            replaced += [entry for email in emails if (entry := self._sync_retries.pop(email, None)) is not None]
         self._work_available.set()
         kept = [ClaimedUser(entry.token, entry.user) for entry in replaced if entry.queued_at is None]
-        if kept and self._retry_mode() == "lease":
+        if kept and lease:
             with suppress(Exception):
                 async with asyncio.timeout(self._internal_timeout):
                     await self._user_sync_store.requeue_users(self.node_id, kept)
@@ -1019,18 +1021,18 @@ class Controller:
             return
         # Users deferred untested go first: unlike a retry, they may be users the node accepts.
         due.sort(key=lambda entry: entry.attempts > 0)
-        if not fenced:
-            due = due[: self._sync_batch_size]
-        async with asyncio.timeout(self._internal_timeout):
-            if mode == "refresh":
-                await self._user_sync_store.request_refresh(self.node_id, [entry.user.email for entry in due])
-            else:
-                await self._user_sync_store.requeue_users(
-                    self.node_id, [ClaimedUser(entry.token, entry.user) for entry in due]
-                )
-        for entry in due:
-            entry.queued_at = now
-        self._work_available.set()
+        size = self._sync_batch_size
+        for chunk in [due[start : start + size] for start in range(0, len(due), size)] if fenced else [due[:size]]:
+            async with asyncio.timeout(self._internal_timeout):
+                if mode == "refresh":
+                    await self._user_sync_store.request_refresh(self.node_id, [entry.user.email for entry in chunk])
+                else:
+                    await self._user_sync_store.requeue_users(
+                        self.node_id, [ClaimedUser(entry.token, entry.user) for entry in chunk]
+                    )
+            for entry in chunk:
+                entry.queued_at = now
+            self._work_available.set()
 
     async def _sync_worker(self):
         """Drain bounded batches, retaining wakes and retrying failures with backoff."""

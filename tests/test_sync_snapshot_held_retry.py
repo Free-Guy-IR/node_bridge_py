@@ -568,6 +568,73 @@ class LeaseModeRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(time.monotonic() - started, 6.5)
 
 
+def slow_enqueue_reply(base):
+    class SlowEnqueueReplyStore(base):
+        def __init__(self):
+            super().__init__()
+            self.gate = None
+            self.committed = asyncio.Event()
+
+        async def enqueue_users(self, node_id, users):
+            await super().enqueue_users(node_id, users)
+            gate, self.gate = self.gate, None
+            if gate is not None:
+                self.committed.set()
+                await gate.wait()
+
+        async def fence_state(self, node_id):
+            await asyncio.sleep(0.01)
+            return await super().fence_state(node_id)
+
+    return SlowEnqueueReplyStore
+
+
+class EnqueueReplyRaceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.nodes = []
+
+    async def asyncTearDown(self):
+        await close_all(self.nodes)
+
+    async def test_a_rejection_of_the_new_revision_during_a_slow_enqueue_reply_is_retried(self):
+        for kind in STORES:
+            for resume in ("after_send", "after_hold"):
+                if kind != "held" and resume == "after_hold":
+                    continue
+                with self.subTest(store=kind, resume=resume):
+                    store = slow_enqueue_reply(STORES[kind])()
+                    fleet = Fleet(store, self.nodes, retry_delays=(0.3, 0.6, 0.6))
+                    node = fleet.worker("A")
+                    send = node.sync_users_chunked
+                    gate = asyncio.Event()
+
+                    async def rejecting(users, **kwargs):
+                        result = await send(users, **kwargs)
+                        if result and resume == "after_send":
+                            gate.set()
+                        return result
+
+                    node.sync_users_chunked = rejecting
+                    if resume == "after_hold":
+                        hold = store.hold_users
+
+                        async def holding(node_id, tokens, retry_after):
+                            await hold(node_id, tokens, retry_after)
+                            gate.set()
+
+                        store.hold_users = holding
+                    await node.connect("0.2.0", "1.0.0")
+                    fleet.refuse.add(("x", ("v2",)))
+                    store.gate = gate
+                    update = asyncio.create_task(node.update_user(User(email="x", inbounds=["v2"])))
+                    await eventually(store.committed.is_set)
+                    await node.wake_sync_worker()
+                    await update
+                    fleet.refuse.clear()
+                    await eventually(lambda: fleet.on_node.get("x") == ["v2"], timeout=4)
+                    await close_all(self.nodes)
+
+
 class SharedStoreSnapshotHammerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.nodes = []

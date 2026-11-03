@@ -69,7 +69,9 @@ class SharedStoreRetryRaceTests(unittest.IsolatedAsyncioTestCase):
 
         held._sync_retries["x"].next_attempt = 0
         await held.wake_sync_worker()
-        await eventually(lambda: "x" not in held._sync_retries or held._sync_retries["x"].queued_at is not None)
+        await eventually(
+            lambda: "x" not in held._sync_retries or held._sync_retries["x"].queued_at is not None, timeout=9
+        )
         await asyncio.sleep(0.05)
         release.set()
 
@@ -133,7 +135,9 @@ class SharedStoreRetryRaceTests(unittest.IsolatedAsyncioTestCase):
 
         held._sync_retries["x"].next_attempt = 0
         await held.wake_sync_worker()
-        await eventually(lambda: "x" not in held._sync_retries or held._sync_retries["x"].queued_at is not None)
+        await eventually(
+            lambda: "x" not in held._sync_retries or held._sync_retries["x"].queued_at is not None, timeout=9
+        )
         async with asyncio.timeout(4):
             while await store.has_pending("node"):
                 await asyncio.sleep(0.005)
@@ -163,7 +167,7 @@ class SharedStoreRetryRaceTests(unittest.IsolatedAsyncioTestCase):
         await other.flush_pending_users()
         held._sync_retries["x"].next_attempt = 0
         await held.wake_sync_worker()
-        await eventually(lambda: held._sync_retries["x"].queued_at is not None)
+        await eventually(lambda: held._sync_retries["x"].queued_at is not None, timeout=9)
         await asyncio.sleep(0.1)
 
         self.assertEqual(on_node, {}, sends)

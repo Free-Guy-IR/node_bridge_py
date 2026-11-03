@@ -577,10 +577,17 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(node._sync_retries["x"].queued_at)
 
         await self.hold_rejected(node, held)
-        await queue_due()
+        node._sync_retries["x"].next_attempt = 0
+        self.expire_holds(node)
+        await node._queue_due_rejected_users()
+        self.assertIsNone(node._sync_retries["x"].queued_at)
+        self.assertEqual(node._sync_retries["x"].rechecks, 1)
+        self.assertTrue(node._work_available.is_set())
         claimed = await store.claim_users("node", "other", 10, 30)
         self.assertEqual([item.user for item in claimed], [held])
         await store.ack_users("node", [item.token for item in claimed])
+        node._sync_hold_rechecks = ()
+        await queue_due()
 
         # Another worker delivered it: the entry waits for a claim here and is forgotten after the window.
         node._sync_retry_window = 0.05

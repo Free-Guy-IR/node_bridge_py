@@ -187,7 +187,8 @@ depends on what the store provides:
   hold. `retire_held` drops, for each token, the queued entry if it is still at
   the revision that token held (or still leases) and no other worker leases it;
   a newer revision is never dropped, and an unknown token is ignored. The retry
-  thus lives in the store: a full sync covers it, a controller that stops does
+  thus lives in the store: a full sync through `sync_users_from_source(...)` on
+  any controller covers it, a controller that stops does
   not lose it, and `flush_pending_users()` on any controller cancels it. Once it
   is due it is claimed at the next wake of a controller on the store: the
   holding controller wakes at its due time, and any controller wakes on an
@@ -213,8 +214,11 @@ depends on what the store provides:
   controller can claim the user again. A newer update through the keeping
   controller returns that user's kept claim at once, a successful `start(...)`
   or `sync_users(...)` acknowledges its kept claims (an entry still at the kept
-  revision is dropped, a newer one stays queued), and an active full-sync fence
-  makes it return all its kept claims in one call at its next wake. A full sync
+  revision is dropped, a newer one stays queued; a claim whose lease already
+  expired, which happens when the backoff is longer than `sync_lease_seconds`,
+  is not dropped and its payload may still be sent after the snapshot), and an
+  active full-sync fence makes it return all its kept claims at its next wake,
+  `sync_batch_size` per store call. A full sync
   therefore waits at most about 5 seconds for the kept claims of a controller
   whose worker runs against a healthy node, and otherwise (the controller
   stopped or died, or its node is disconnected or broken) at most one lease,
@@ -231,11 +235,16 @@ depends on what the store provides:
 
 A newer update through this controller forgets the user's backoff, and a
 successful `start(...)`, `sync_users(...)` or `flush_pending_users()` clears all
-of them. After `start(...)` or `sync_users(...)` the payloads held for those
-retries are dropped from the store when still at the rejected revision
-(`retire_held` or `ack_users`; a refresh store has nothing queued for them), so
-a later wake never sends a pre-snapshot payload over the snapshot; a newer
-revision stays queued. A delivery round whose send is still in flight may then
+of them. After `start(...)` or `sync_users(...)` the payloads held for this
+controller's retries are dropped from the store when still at the rejected
+revision (`retire_held`, or `ack_users` of a kept claim whose lease is still
+live; a refresh store has nothing queued for them), so this controller's
+retries do not send a pre-snapshot payload over the snapshot; a newer revision
+stays queued. A direct `start(...)` or `sync_users(...)` does not touch the
+retries of other controllers on the store: one of them can still send its
+held payload after the snapshot. Use `sync_users_from_source(...)`, whose
+fence and capture cover every controller's queued and held work, when several
+controllers share a store. A delivery round whose send is still in flight may then
 hold again the users it sees rejected. The backoff state lives in this controller's memory,
 one entry per user, and each controller on a shared store keeps its own. While a
 full-sync fence is active, the claim of a user held for retry is returned to the
