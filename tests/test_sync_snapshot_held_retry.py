@@ -689,6 +689,44 @@ class SnapshotRetireFailureTests(unittest.IsolatedAsyncioTestCase):
                 await close_all(self.nodes)
 
 
+class HoldCallsPerRoundTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.nodes = []
+
+    async def asyncTearDown(self):
+        await close_all(self.nodes)
+
+    async def test_the_users_one_round_rejects_are_held_in_one_store_call(self):
+        calls = []
+
+        class PerCallCostStore(InMemoryUserSyncStore):
+            async def hold_users(self, node_id, tokens, retry_after):
+                calls.append(len(tokens))
+                await asyncio.sleep(0.2)
+                await super().hold_users(node_id, tokens, retry_after)
+
+        store = PerCallCostStore()
+        node = RecordingNode(
+            user_sync_store=store, worker_id="A", sync_lease_seconds=30.0, sync_batch_size=8, internal_timeout=1
+        )
+        node._sync_retry_delays = (30.0, 60.0, 300.0)
+        self.nodes.append(node)
+        sends = []
+
+        async def send(users, **kwargs):
+            sends.append([user.email for user in users])
+            return FailedUsers(users, rejected=True, detail="proxy is not a UserManager")
+
+        node.sync_users_chunked = send
+        await node.update_users([User(email=f"u{i}", inbounds=["v1"]) for i in range(8)])
+        await node.connect("0.2.0", "1.0.0")
+        await eventually(lambda: len(calls) >= 1, timeout=5)
+        await asyncio.sleep(1.5)
+        self.assertEqual(calls, [8])
+        self.assertLessEqual(len(sends), 15, sends)
+        self.assertEqual(node._user_sync_failure_count, 0)
+
+
 def slow_enqueue_reply(base):
     class SlowEnqueueReplyStore(base):
         def __init__(self):

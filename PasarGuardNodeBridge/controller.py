@@ -257,6 +257,7 @@ class Controller:
         self._sync_retry_delays = (2.0, 60.0, 300.0)
         self._sync_retry_window = 600.0
         self._sync_hold_rechecks = (0.05, 0.25, 1.0, 5.0)
+        self._sync_hold_merge = 1.0
         # Most sends a round spends on a rejected batch (enough to isolate one user among 128), and the
         # end of the current round, so isolation leaves the rest for the next round instead of overrunning.
         self._sync_isolation_calls = 16
@@ -762,17 +763,24 @@ class Controller:
         if not claimed_users or await self._return_claims_to_a_snapshot(claimed_users):
             return
         now = asyncio.get_running_loop().time()
-        delays: dict[float, list[ClaimedUser]] = {}
+        waits: list[tuple[float, ClaimedUser]] = []
         superseded = []
         for item in claimed_users:
             entry = self._sync_retries.get(item.user.email)
             if entry is None or entry.token != item.token:
                 superseded.append(item.token)
                 continue
-            delays.setdefault(max(entry.next_attempt - now, 0.0), []).append(item)
+            waits.append((max(entry.next_attempt - now, 0.0), item))
         if superseded:
             await self._user_sync_store.retire_held(self.node_id, superseded)
-        for delay, items in delays.items():
+        groups: list[tuple[float, float, list[ClaimedUser]]] = []
+        for wait, item in sorted(waits, key=lambda pair: pair[0]):
+            if groups and wait - groups[-1][0] <= self._sync_hold_merge:
+                first, _, items = groups[-1]
+                groups[-1] = (first, wait, items + [item])
+            else:
+                groups.append((wait, wait, [item]))
+        for _, delay, items in groups:
             await self._user_sync_store.hold_users(self.node_id, [item.token for item in items], delay)
             due = asyncio.get_running_loop().time() + delay
             for item in items:
