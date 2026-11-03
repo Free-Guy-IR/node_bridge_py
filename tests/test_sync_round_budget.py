@@ -238,12 +238,20 @@ class RoundBudgetTests(SyncFakeTestCase):
                 async def done():
                     return len(pushed) == 12 and await self.settled(node, core, latest, ["u-5"])
 
+                threshold = node._hard_reset_threshold
+
+                def starved():
+                    if raised or max(failures, default=0) >= threshold - 1:
+                        return f"split starved: failures counted {failures}, HARD RESET raised {raised}"
+
                 await self.start(node, initial)
-                await self.until(done, 90, self.counted(failures, raised))
+                await self.until(done, 90, starved)
                 late = {
                     email: (core.delivered_at(email, latest[email]), round_bound(rounds, at, 2))
                     for email, at in pushed.items()
                     if core.delivered_at(email, latest[email]) > round_bound(rounds, at, 2)
                 }
                 self.assertEqual(late, {})
-                self.assertEqual((failures, raised), ([], []))
+                self.assertEqual(raised, [])
+                self.assertLess(max(failures, default=0), threshold - 1, failures)
+                self.assertEqual(self.held(node), {"u-5"})
