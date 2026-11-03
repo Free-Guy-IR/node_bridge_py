@@ -63,12 +63,39 @@ class ParityError(Exception):
     pass
 
 
+C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def diff_name(name: str, prefix: str) -> str | None:
+    if name.startswith('"') and name.endswith('"') and len(name) >= 2:
+        raw = bytearray()
+        body = name[1:-1]
+        index = 0
+        while index < len(body):
+            char = body[index]
+            if char != "\\":
+                raw += char.encode("utf-8", "surrogateescape")
+                index += 1
+            elif body[index + 1 : index + 4].isdigit() and len(body[index + 1 : index + 4]) == 3:
+                raw.append(int(body[index + 1 : index + 4], 8) & 0xFF)
+                index += 4
+            elif body[index + 1 : index + 2] in C_ESCAPES:
+                raw.append(C_ESCAPES[body[index + 1]])
+                index += 2
+            else:
+                raise ParityError(f"unreadable quoted path in diff: {name!r}")
+        name = raw.decode("utf-8", "replace")
+    else:
+        name = name.removesuffix("\t")
+    return name[len(prefix) :] if name.startswith(prefix) else None
+
+
 def parse_diff(diff: str) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     added: dict[str, list[str]] = {}
     deleted: dict[str, list[str]] = {}
     source = target = None
     old_left = new_left = 0
-    for line in diff.splitlines():
+    for line in diff.split("\n"):
         if old_left > 0 or new_left > 0:
             if line.startswith("+") and new_left > 0:
                 new_left -= 1
@@ -88,11 +115,9 @@ def parse_diff(diff: str) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
         if line.startswith("diff "):
             source = target = None
         elif line.startswith("--- "):
-            name = line[4:]
-            source = name[2:] if name.startswith("a/") else None
+            source = diff_name(line[4:], "a/")
         elif line.startswith("+++ "):
-            name = line[4:]
-            target = name[2:] if name.startswith("b/") else None
+            target = diff_name(line[4:], "b/")
         else:
             hunk = HUNK.match(line)
             if hunk:
@@ -139,13 +164,11 @@ class Git:
         self.root = root
 
     def run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(
-            ["git", "-C", str(self.root), *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
+        raw = subprocess.run(
+            ["git", "-C", str(self.root), "-c", "core.quotePath=false", *args], capture_output=True, check=False
+        )
+        result = subprocess.CompletedProcess(
+            raw.args, raw.returncode, raw.stdout.decode("utf-8", "replace"), raw.stderr.decode("utf-8", "replace")
         )
         if check and result.returncode != 0:
             raise ParityError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
@@ -223,7 +246,7 @@ class Git:
         result = self.run("show", f"{head}:{path}", check=False)
         if result.returncode != 0:
             return None
-        return {line.strip() for line in result.stdout.splitlines()}
+        return {line.strip() for line in result.stdout.split("\n")}
 
     def rev_list(self, include: list[str], exclude: list[str]) -> list[Commit]:
         args = ["log", "--format=%H%x09%s", *include]
@@ -231,7 +254,9 @@ class Git:
             args += ["--not", *exclude]
         output = self.run(*args, "--").stdout
         commits = []
-        for line in output.splitlines():
+        for line in output.split("\n"):
+            if not line:
+                continue
             sha, _, subject = line.partition("\t")
             commits.append(Commit(sha, subject))
         return commits
@@ -422,17 +447,6 @@ def check_no_added_lines(entry: dict, label: str, carriers: list[str], git: Git,
             f"{label}: upstream {upstream_sha[:10]} adds no lines, so an adapted port of it needs a"
             " `no_added_lines` text saying how the fork carries it"
         )
-    deleted = git.deleted_lines(upstream_sha)
-    if deleted:
-        for path, lines in sorted(deleted.items()):
-            present = {normalise(line) for line in git.file_lines(head, path) or set()}
-            kept = [line for line in lines if normalise(line) and normalise(line) in present]
-            if kept:
-                report.fail(
-                    f"{label}: {len(kept)} line(s) upstream {upstream_sha[:10]} deleted from {path} are still"
-                    f" at HEAD, first {kept[0].strip()[:100]!r}"
-                )
-        return
     paths = git.changed_paths(upstream_sha)
     if not paths:
         report.fail(f"{label}: upstream {upstream_sha[:10]} changes no file, so there is nothing to port; waive it")
@@ -441,6 +455,18 @@ def check_no_added_lines(entry: dict, label: str, carriers: list[str], git: Git,
     untouched = sorted(paths - touched)
     if untouched:
         report.fail(f"{label}: upstream {upstream_sha[:10]} changes {untouched[0]}, which no fork commit touches")
+    for path, lines in sorted(git.deleted_lines(upstream_sha).items()):
+        at_head = git.file_lines(head, path)
+        if at_head is None:
+            report.fail(f"{label}: upstream {upstream_sha[:10]} deletes lines from {path}, but {path} is not at HEAD")
+            continue
+        present = {normalise(line) for line in at_head}
+        kept = [line for line in lines if normalise(line) and normalise(line) in present]
+        if kept:
+            report.fail(
+                f"{label}: {len(kept)} line(s) upstream {upstream_sha[:10]} deleted from {path} are still"
+                f" at HEAD, first {kept[0].strip()[:100]!r}"
+            )
 
 
 def check_adapted_lines(entry: dict, label: str, fork: list[str], git: Git, head: str, report: Report) -> None:
@@ -459,21 +485,32 @@ def check_adapted_lines(entry: dict, label: str, fork: list[str], git: Git, head
         check_no_added_lines(entry, label, carriers, git, head, report)
         return
     carried = set().union(*carried_by_path.values()) if carried_by_path else set()
+    covered = set().union(
+        *(lines & lines_at_head({path}, git, head) for path, lines in carried_by_path.items())
+    )
     present = lines_at_head(set(carried_by_path) | set(upstream_added), git, head)
-    covered = carried & present
     excused: set[str] = set()
     for item in items:
-        line = normalise(str(item.get("line", ""))) if isinstance(item, dict) else ""
+        raw = item.get("line") if isinstance(item, dict) else None
+        if not isinstance(raw, str):
+            report.fail(f"{label}: a `diverged_lines` item needs a string `line`, got {raw!r}")
+            continue
+        line = normalise(raw)
         if not line:
             report.fail(f"{label}: a `diverged_lines` item needs a non-empty `line`")
             continue
         if not str(item.get("reason", "")).strip():
             report.fail(f"{label}: diverged line {line[:80]!r} needs a `reason`")
             continue
+        if line in excused:
+            report.fail(f"{label}: diverged line {line[:80]!r} is listed twice in `diverged_lines`")
+            continue
         if line not in upstream:
             report.fail(f"{label}: diverged line {line[:80]!r} is not an upstream added line")
         elif line in covered:
             report.fail(f"{label}: diverged line {line[:80]!r} is listed, but the fork commits carry it")
+        elif line in present and line not in carried:
+            report.fail(f"{label}: diverged line {line[:80]!r} is at HEAD but no fork commit carries it; name that commit")
         excused.add(line)
     gone = sorted((upstream & carried) - covered - excused)
     if gone:

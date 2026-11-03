@@ -1,6 +1,8 @@
 import copy
 import datetime
 import importlib.util
+import os
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -310,6 +312,7 @@ class UpstreamParityTests(unittest.TestCase):
         ledger = self.adapted(git)
         item = entry(ledger, U_TIMEOUT)
         git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330"]}
+        git.files["bridge.py"] = {"timeout = 330"}
         item["diverged_lines"] = [{"line": "retry(user)"}]
         self.assertFailsWith(self.run_check(ledger=ledger, git=git), "needs a `reason`")
         item["diverged_lines"] = [{"line": "retry( user )", "reason": "held in the store"}]
@@ -687,6 +690,94 @@ class UpstreamParityTests(unittest.TestCase):
         tags = [item["tag"] for item in ledger["release"]]
         self.assertIn(ledger["upstream"]["floor"], tags)
         self.assertEqual(len(tags), len(set(tags)))
+
+    def test_bj_a_a_carried_line_counts_only_where_its_fork_commit_put_it(self):
+        git = FakeGit()
+        ledger = self.adapted(git)
+        entry(ledger, U_TIMEOUT).update(diverged=[F_DIVERGE], divergence="the retry moved out of other.py")
+        git.diffs[F_DIVERGE] = ["-retry(user)"]
+        git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330"], "other.py": ["retry(user)"]}
+        git.files["other.py"] = {"timeout = 330"}
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "but absent at HEAD")
+        git.files["other.py"] = {"retry(user)"}
+        self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+
+    def test_bj_e_diverged_lines_must_be_unique_strings_absent_at_head(self):
+        git = FakeGit()
+        ledger = self.adapted(git)
+        item = entry(ledger, U_TIMEOUT)
+        git.added[U_TIMEOUT]["bridge.py"].append("count = 5")
+        git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330"]}
+        git.files["bridge.py"] = {"timeout = 330"}
+        item["diverged_lines"] = [
+            {"line": "retry(user)", "reason": "held"},
+            {"line": " retry(user)", "reason": "held twice"},
+            {"line": "count = 5", "reason": "dropped"},
+        ]
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "is listed twice in `diverged_lines`")
+        item["diverged_lines"] = [{"line": "retry(user)", "reason": "held"}, {"line": 5, "reason": "number"}]
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "needs a string `line`")
+        item["diverged_lines"] = [{"line": "retry(user)", "reason": "held"}, {"line": "count = 5", "reason": "x"}]
+        self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+        git.files["bridge.py"] = {"timeout = 330", "retry(user)"}
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "is at HEAD but no fork commit carries it")
+
+    def test_bj_f_an_upstream_deletion_needs_a_fork_commit_on_its_path_and_the_file_at_head(self):
+        git = FakeGit()
+        ledger = self.adapted(git)
+        item = entry(ledger, U_TIMEOUT)
+        item["no_added_lines"] = "upstream only deletes the legacy call"
+        git.added[U_TIMEOUT] = {}
+        git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330"]}
+        git.deleted[U_TIMEOUT] = {"legacy.py": ["legacy(user)"]}
+        git.files["legacy.py"] = {"other(user)"}
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "changes legacy.py, which no fork commit touches")
+        git.paths[F_TIMEOUT] = {"bridge.py", "legacy.py"}
+        self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+        git.files.pop("legacy.py")
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "legacy.py is not at HEAD")
+
+
+class DiffReaderTests(unittest.TestCase):
+    def git(self, root, *args):
+        env = {
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "HOME": str(root),
+            "PATH": os.environ.get("PATH", ""),
+        }
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, env=env)
+
+    def test_bj_b_c_d_paths_with_spaces_or_non_ascii_and_lines_with_form_feeds_or_cr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.git(root, "init", "-q")
+            self.git(root, "config", "core.quotePath", "true")
+            (root / "a b.py").write_bytes(b"x = 1\n")
+            (root / "é.py").write_bytes("y = 2\n".encode())
+            (root / "f.py").write_bytes(b"a\x0cb\nc\rd\ne\x0bf\n")
+            self.git(root, "add", "-A")
+            self.git(root, "commit", "-q", "-m", "add")
+            git = parity.Git(root)
+            added, _ = git.changes("HEAD")
+            self.assertEqual(
+                added, {"a b.py": ["x = 1"], "é.py": ["y = 2"], "f.py": ["a\x0cb", "c\rd", "e\x0bf"]}
+            )
+            self.assertEqual(git.file_lines("HEAD", "f.py"), {"a\x0cb", "c\rd", "e\x0bf", ""})
+            self.assertEqual(git.changed_paths("HEAD"), {"a b.py", "é.py", "f.py"})
+
+    def test_bj_b_c_parse_diff_reads_git_quoted_and_tab_terminated_names(self):
+        diff = (
+            "diff --git a/a b b/a b\n--- a/a b\t\n+++ b/a b\t\n@@ -1 +1 @@\n-old\n+new\n"
+            'diff --git "a/\\303\\251.py" "b/\\303\\251.py"\n--- "a/\\303\\251.py"\n+++ "b/\\303\\251.py"\n'
+            "@@ -1 +1 @@\n-\x0c\n+q\\\"\n"
+        )
+        added, deleted = parity.parse_diff(diff)
+        self.assertEqual(added, {"a b": ["new"], "é.py": ['q\\"']})
+        self.assertEqual(deleted, {"a b": ["old"], "é.py": ["\x0c"]})
 
 
 if __name__ == "__main__":
