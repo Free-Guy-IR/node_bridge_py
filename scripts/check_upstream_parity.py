@@ -264,14 +264,9 @@ def parse_date(value, label: str, report: Report) -> datetime.date | None:
     return None
 
 
-def check_ported(entry: dict, label: str, git: Git, head: str, report: Report) -> None:
-    upstream_sha = entry["upstream"]
-    fork = entry.get("fork")
-    if not isinstance(fork, list) or not fork:
-        report.fail(f"{label}: ported entry needs a non-empty `fork` list of fork commit SHAs")
-        return
+def fork_commits_in_history(shas: list, label: str, git: Git, head: str, report: Report) -> bool:
     present = []
-    for sha in fork:
+    for sha in shas:
         if not isinstance(sha, str) or not SHA.match(sha):
             report.fail(f"{label}: fork commit {sha!r} is not a full 40-hex SHA")
         elif not git.has_commit(sha):
@@ -281,7 +276,28 @@ def check_ported(entry: dict, label: str, git: Git, head: str, report: Report) -
             report.fail(f"{label}: fork commit {sha} is not in the history of {head}{hint}")
         else:
             present.append(sha)
-    if len(present) != len(fork):
+    return len(present) == len(shas)
+
+
+def check_divergence(entry: dict, label: str, git: Git, head: str, report: Report) -> None:
+    if "diverged" not in entry and "divergence" not in entry:
+        return
+    diverged = entry.get("diverged")
+    if not isinstance(diverged, list) or not diverged:
+        report.fail(f"{label}: a divergence needs a non-empty `diverged` list of the fork commits that diverge")
+    else:
+        fork_commits_in_history(diverged, label, git, head, report)
+    if not str(entry.get("divergence", "")).strip():
+        report.fail(f"{label}: a `diverged` list needs a `divergence` text saying how the fork differs")
+
+
+def check_ported(entry: dict, label: str, git: Git, head: str, report: Report) -> None:
+    upstream_sha = entry["upstream"]
+    fork = entry.get("fork")
+    if not isinstance(fork, list) or not fork:
+        report.fail(f"{label}: ported entry needs a non-empty `fork` list of fork commit SHAs")
+        return
+    if not fork_commits_in_history(fork, label, git, head, report):
         return
     match = entry.get("match")
     if match not in MATCHES:
@@ -321,6 +337,7 @@ def check_entry(
     if status not in STATUSES:
         report.fail(f"{label}: status must be one of {', '.join(STATUSES)}, got {status!r}")
         return
+    check_divergence(entry, label, git, head, report)
     if status == "ported":
         check_ported(entry, label, git, head, report)
     elif status == "version-only":

@@ -34,9 +34,9 @@ upstream = "9fa9f264cde1cd4a759f67fe2fd1b559b74990d2"
 release = "v0.9.3"
 subject = "feat: add Masque message and integrate into Proxy and utils (#24)"
 status = "deferred"
-owner = "BRIDGE/PANEL-LEAD"
+owner = "BRIDGE, NODE-LEAD for the node proto field"
 until = "2026-11-09"
-reason = "upstream puts Masque at Proxy field 7, which the fork uses for Hysteria2; needs Masque at field 12 on node main first. Re-dated 2026-11-03 from 2026-11-05: NODE-LEAD decides node masque=12 in round 3 and no decision was recorded by 2026-11-03 08:50; re-decide on 2026-11-09 against node main"
+reason = "upstream puts Masque at Proxy field 7, which the fork uses for Hysteria2 (Hysteria2 hysteria2 = 7 in the fork's service.proto). The fork bridge's proto is pinned to the node's (proto.lock, Proto drift CI), so the port needs Masque at a free field, 12, on Free-Guy-IR/node main first. Checked 2026-11-03 18:20 +0330: node main 32b7c1b84ea2 has Proxy fields hysteria2 = 7, tuic = 10, l2tp = 11 and no Masque; masque = 12 exists only on local node branches (NODE-LEAD). Re-dated 2026-11-03 from 2026-11-05; on 2026-11-09 port it with Masque at the field node main carries, or waive it with the reason"
 
 [[commit]]
 upstream = "e408d7720b8f3581d4668c5f87887b3d69e66668"
@@ -63,7 +63,22 @@ fork = [
     "c8b6707fb79a431c85bb5b9fff82135b7c40f303",
 ]
 match = "adapted"
-reason = "split into three commits for review; their changed lines equal a01bdbb's; the F-U27-1 fix 448eb04 builds on it"
+reason = "split into three commits for review; their changed lines equal a01bdbb's"
+diverged = [
+    "5bba04822561e4761d3de9401f5452e6f9a51e48",
+    "d886f425225bfc036761ca665b02cc6cb578d8d4",
+    "3eee26283316a668459026b98c97cdd1ba483c12",
+    "448eb044d27299e7d58e886bc73433e024e7762d",
+    "013202e50bdbccecf6fe5782b7d843d4a11d42cc",
+    "63223135e4c5c917c44ca9cb3390c6f2bb95c9cc",
+    "9e6cd122b3e2f9edd97392a1f8ca4f5e128b297f",
+    "ecb411cf45995670af86c6e7bd17a8935b6e7624",
+    "a2775e4f4af4d45b09e4359faa6e55c87682da13",
+    "314c285291c1c5d4c4f15bc043e6db7ac8d3b5c5",
+    "2808122c176567fe7cb919a6bb3f7af0ceaebe5b",
+    "b67402c88c228868c104c5e60b761f5becc1970e",
+]
+divergence = "fork divergence, not upstream behaviour: a01bdbb keeps a rejected user's payload in an in-memory per-node retry map; on the fork the store owns the held retry. A store with hold_users and retire_held keeps the entry at its revision, unclaimable until due, and a snapshot retires it; a store with request_refresh acks and refreshes when due; any other store keeps the claim leased for the backoff (README store contract). 448eb04 and 013202e keep a held retry from replacing a newer change, 6322313 moves the hold into the store, 9e6cd12 through b67402c fix its due, snapshot, fence and batching paths. The fork also keeps isolation progress across rounds on slow nodes (5bba048) and hard-resets a node that rejects every user (d886f42, 3eee262), which upstream does not"
 
 [[commit]]
 upstream = "f892a5ccb6cff597ec233854dea7abc46981d1bb"

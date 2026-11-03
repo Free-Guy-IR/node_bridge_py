@@ -22,6 +22,7 @@ U_BUMP3 = "5" * 40
 F_SYNC = "a" * 40
 F_TIMEOUT = "b" * 40
 F_ELSEWHERE = "c" * 40
+F_DIVERGE = "e" * 40
 U_DEV = "d" * 40
 V_LINES = ['-version = "0.9.1"', '+version = "0.9.2"', '-__version__ = "0.9.1"', '+__version__ = "0.9.2"']
 V3_LINES = ['-version = "0.9.2"', '+version = "0.9.3"', "-Version: 0.9.2", "+Version: 0.9.3"]
@@ -29,8 +30,8 @@ V3_LINES = ['-version = "0.9.2"', '+version = "0.9.3"', "-Version: 0.9.2", "+Ver
 
 class FakeGit:
     def __init__(self):
-        self.history = {F_SYNC, F_TIMEOUT}
-        self.commits = {F_SYNC, F_TIMEOUT, F_ELSEWHERE}
+        self.history = {F_SYNC, F_TIMEOUT, F_DIVERGE}
+        self.commits = {F_SYNC, F_TIMEOUT, F_ELSEWHERE, F_DIVERGE}
         self.patch_ids = {U_SYNC: "p-sync", F_SYNC: "p-sync", U_TIMEOUT: "p-timeout", F_TIMEOUT: "p-timeout"}
         self.messages = {F_SYNC: "fix: sync\n", F_TIMEOUT: "fix: timeout\n", F_ELSEWHERE: "x\n"}
         self.diffs = {U_BUMP2: V_LINES, U_BUMP3: V3_LINES}
@@ -197,6 +198,31 @@ class UpstreamParityTests(unittest.TestCase):
         self.assertFailsWith(self.run_check(ledger=ledger, git=git), "cites the upstream SHA")
         git.messages[F_TIMEOUT] = f"fix: timeout\n\nUpstream {U_TIMEOUT[:7]}, adapted.\n"
         self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+
+    def test_divergence_with_fork_commits_in_history_passes(self):
+        ledger = make_ledger()
+        entry(ledger, U_SYNC).update(diverged=[F_DIVERGE], divergence="retries are held in the store")
+        self.assertEqual(self.run_check(ledger=ledger).failures, [])
+
+    def test_diverged_commit_outside_history_fails(self):
+        ledger = make_ledger()
+        entry(ledger, U_SYNC).update(diverged=[F_DIVERGE, F_ELSEWHERE], divergence="retries are held in the store")
+        self.assertFailsWith(self.run_check(ledger=ledger), f"fork commit {F_ELSEWHERE} is not in the history")
+
+    def test_diverged_short_sha_fails(self):
+        ledger = make_ledger()
+        entry(ledger, U_SYNC).update(diverged=[F_DIVERGE[:12]], divergence="retries are held in the store")
+        self.assertFailsWith(self.run_check(ledger=ledger), "is not a full 40-hex SHA")
+
+    def test_diverged_without_a_divergence_text_fails(self):
+        ledger = make_ledger()
+        entry(ledger, U_SYNC).update(diverged=[F_DIVERGE], divergence="  ")
+        self.assertFailsWith(self.run_check(ledger=ledger), "needs a `divergence` text")
+
+    def test_divergence_text_without_diverged_commits_fails(self):
+        ledger = make_ledger()
+        entry(ledger, U_SYNC)["divergence"] = "retries are held in the store"
+        self.assertFailsWith(self.run_check(ledger=ledger), "non-empty `diverged` list")
 
     def test_version_only_with_a_code_change_fails(self):
         git = FakeGit()
