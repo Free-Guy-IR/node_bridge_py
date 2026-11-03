@@ -620,6 +620,75 @@ class LeaseModeRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(keeper._user_sync_failure_count, failures)
 
 
+class FailingRetireStores:
+    class Held(InMemoryUserSyncStore):
+        def __init__(self):
+            super().__init__()
+            self.fail = 0
+            self.gate = None
+            self.entered = asyncio.Event()
+
+        async def retire_held(self, node_id, tokens):
+            if self.gate is not None:
+                self.entered.set()
+                await self.gate.wait()
+            if self.fail:
+                self.fail -= 1
+                raise ConnectionError("store briefly unavailable")
+            await super().retire_held(node_id, tokens)
+
+    class Lease(LeaseOnlyStore):
+        def __init__(self):
+            super().__init__()
+            self.fail = 0
+
+        async def ack_users(self, node_id, tokens):
+            if self.fail:
+                self.fail -= 1
+                raise ConnectionError("store briefly unavailable")
+            return await super().ack_users(node_id, tokens)
+
+
+class SnapshotRetireFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.nodes = []
+
+    async def asyncTearDown(self):
+        await close_all(self.nodes)
+
+    async def test_a_snapshot_whose_retire_fails_or_is_cancelled_never_lets_the_old_payload_back(self):
+        for case in ("held_fails", "held_cancelled", "lease_fails"):
+            with self.subTest(case=case):
+                lease = case == "lease_fails"
+                store = FailingRetireStores.Lease() if lease else FailingRetireStores.Held()
+                fleet = Fleet(store, self.nodes, retry_delays=(0.3, 60.0, 300.0), lease=1.5 if lease else 60.0)
+                fleet.refuse.add(("x", ("v1",)))
+                node = fleet.worker("A")
+                await node.update_user(User(email="x", inbounds=["v1"]))
+                await node.connect("0.2.0", "1.0.0")
+                await eventually(lambda: "x" in node._sync_retries)
+                await asyncio.sleep(0.05)
+                fleet.refuse.clear()
+                await node.sync_users([User(email="x", inbounds=["v2"])], flush_pending=False)
+                if case == "held_cancelled":
+                    store.gate = asyncio.Event()
+                    clearing = asyncio.create_task(node._clear_rejected_users())
+                    await eventually(store.entered.is_set)
+                    clearing.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await clearing
+                    store.gate = None
+                else:
+                    store.fail = 1
+                    await node._clear_rejected_users()
+                await asyncio.sleep(2.0 if lease else 0.6)
+                await node.update_user(User(email="y", inbounds=["y1"]))
+                await eventually(lambda: fleet.on_node.get("y") == ["y1"], timeout=4)
+                await asyncio.sleep(0.3)
+                self.assertEqual(fleet.on_node.get("x"), ["v2"], fleet.sends)
+                await close_all(self.nodes)
+
+
 def slow_enqueue_reply(base):
     class SlowEnqueueReplyStore(base):
         def __init__(self):

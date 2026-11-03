@@ -252,6 +252,7 @@ class Controller:
         # Users the node rejected, keyed by email, queued again after a backoff (one entry per user)
         self._sync_retries: dict[str, _RejectedUser] = {}
         self._updated_in_round: set[str] = set()
+        self._sync_unretired: list[str] = []
         # First retry delay, doubled up to the cap; after the window an add is retried at the last delay.
         self._sync_retry_delays = (2.0, 60.0, 300.0)
         self._sync_retry_window = 600.0
@@ -953,14 +954,24 @@ class Controller:
             tokens = [entry.token for entry in self._sync_retries.values() if entry.queued_at is None]
         self._sync_retries.clear()
         self._sync_rejecting_since = None
-        if tokens and mode != "refresh":
+        if mode != "refresh":
+            self._sync_unretired += tokens
+        if self._sync_unretired:
             with suppress(Exception):
-                async with asyncio.timeout(self._internal_timeout):
-                    if mode == "hold":
-                        await self._user_sync_store.retire_held(self.node_id, tokens)
-                    else:
-                        await self._user_sync_store.ack_users(self.node_id, tokens)
+                await self._retire_unretired()
             self._work_available.set()
+
+    async def _retire_unretired(self) -> None:
+        tokens = list(self._sync_unretired)
+        if not tokens:
+            return
+        async with asyncio.timeout(self._internal_timeout):
+            if self._retry_mode() == "hold":
+                await self._user_sync_store.retire_held(self.node_id, tokens)
+            else:
+                await self._user_sync_store.ack_users(self.node_id, tokens)
+        retired = set(tokens)
+        self._sync_unretired = [token for token in self._sync_unretired if token not in retired]
 
     def _mark_claimed_back(self, claimed: list[ClaimedUser]) -> None:
         if not claimed or self._retry_mode() != "hold":
@@ -1057,6 +1068,8 @@ class Controller:
                         await asyncio.sleep(retry_delay)
                         retry_delay = min(retry_delay * 2, 30.0)
                         continue
+                    if self._sync_unretired:
+                        await self._retire_unretired()
                     if self._sync_retries:
                         await self._queue_due_rejected_users()
                     # Store latency, resolver, transport lock and all stream chunks
