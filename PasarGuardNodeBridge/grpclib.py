@@ -302,7 +302,7 @@ class Node(PasarGuardNode):
                 except Exception as e:
                     await self.disconnect()
                     self._handle_error(e)
-                self._clear_rejected_users()
+                await self._clear_rejected_users()
 
                 await self._release_lifecycle_lease(
                     lease,
@@ -420,7 +420,7 @@ class Node(PasarGuardNode):
                 request=service.Users(users=users),
                 timeout=timeout,
             )
-        self._clear_rejected_users()
+        await self._clear_rejected_users()
         return response
 
     async def sync_users_chunked(

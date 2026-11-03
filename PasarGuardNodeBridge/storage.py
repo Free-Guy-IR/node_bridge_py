@@ -58,8 +58,7 @@ class UserSyncStoreProtocol(Protocol):
 
 
 class HeldRetryUserSyncStoreProtocol(UserSyncStoreProtocol, Protocol):
-    async def hold_users(self, node_id: str, tokens: list[str]) -> None: ...
-    async def requeue_held_users(self, node_id: str, held_users: list[ClaimedUser]) -> list[str]: ...
+    async def hold_users(self, node_id: str, tokens: list[str], retry_after: float) -> None: ...
 
 
 class SnapshotUserSyncStoreProtocol(UserSyncStoreProtocol, Protocol):
@@ -159,7 +158,7 @@ class InMemoryUserSyncStore:
         self._active: dict[str, dict[str, str]] = {}
         self._revision = 0
         self._fences: dict[str, tuple[str, float, int]] = {}
-        self._held: dict[str, dict[str, str]] = {}
+        self._held: dict[str, dict[str, float]] = {}
         self._lock = asyncio.Lock()
 
     async def enqueue_users(self, node_id: str, users: list[User]) -> None:
@@ -186,7 +185,7 @@ class InMemoryUserSyncStore:
                     self._revision += 1
                     pending[user.email] = (User.FromString(user.SerializeToString()), self._revision)
 
-    async def hold_users(self, node_id: str, tokens: list[str]) -> None:
+    async def hold_users(self, node_id: str, tokens: list[str], retry_after: float) -> None:
         if not tokens:
             return
         async with self._lock:
@@ -195,33 +194,16 @@ class InMemoryUserSyncStore:
             pending = self._pending.setdefault(node_id, {})
             active = self._active.setdefault(node_id, {})
             held = self._held.setdefault(node_id, {})
+            until = time.monotonic() + max(retry_after, 0.0)
             for token in tokens:
                 item = claimed.pop(token, None)
                 if item is None:
                     continue
                 email, revision, _ = item
                 active.pop(email, None)
-                if email in pending and pending[email][1] != revision:
-                    continue
-                pending.pop(email, None)
-                held[email] = token
-
-    async def requeue_held_users(self, node_id: str, held_users: list[ClaimedUser]) -> list[str]:
-        if not held_users:
-            return []
-        async with self._lock:
-            pending = self._pending.setdefault(node_id, {})
-            held = self._held.get(node_id, {})
-            superseded = []
-            for item in held_users:
-                email = item.user.email
-                if held.get(email) != item.token:
-                    superseded.append(email)
-                    continue
-                del held[email]
-                self._revision += 1
-                pending[email] = (User.FromString(item.user.SerializeToString()), self._revision)
-            return superseded
+                if email in pending and pending[email][1] == revision:
+                    pending[email] = pending.pop(email)
+                    held[email] = until
 
     def _expire_claims(self, node_id: str) -> None:
         claimed = self._claimed.setdefault(node_id, {})
@@ -247,8 +229,11 @@ class InMemoryUserSyncStore:
             active = self._active.setdefault(node_id, {})
             until = time.monotonic() + lease_seconds
             result: list[ClaimedUser] = []
-            ready = (email for email in pending if email not in active)
-            for email in islice(ready, limit):
+            held = self._held.setdefault(node_id, {})
+            now = time.monotonic()
+            ready = (email for email in pending if email not in active and held.get(email, 0.0) <= now)
+            for email in list(islice(ready, limit)):
+                held.pop(email, None)
                 user, revision = pending[email]
                 token = f"{worker_id}:{uuid4()}"
                 claimed[token] = (email, revision, until)
@@ -287,7 +272,9 @@ class InMemoryUserSyncStore:
     async def has_pending(self, node_id: str) -> bool:
         """Includes leased work so another worker can recover it after expiry."""
         async with self._lock:
-            return bool(self._pending.get(node_id))
+            held = self._held.get(node_id, {})
+            now = time.monotonic()
+            return any(held.get(email, 0.0) <= now for email in self._pending.get(node_id, {}))
 
     async def begin_full_sync(self, node_id: str, worker_id: str, lease_seconds: float) -> str | None:
         async with self._lock:
@@ -329,9 +316,11 @@ class InMemoryUserSyncStore:
             pending = self._pending.get(node_id, {})
             active = self._active.get(node_id, {})
             retired = 0
+            held = self._held.get(node_id, {})
             for email, revision in captured.items():
                 if email not in active and email in pending and pending[email][1] == revision:
                     del pending[email]
+                    held.pop(email, None)
                     retired += 1
             return retired
 

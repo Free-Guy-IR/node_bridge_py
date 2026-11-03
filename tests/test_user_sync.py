@@ -94,31 +94,34 @@ class QueueStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.store.enqueue_users_if_absent("node", [self.old])  # newer queued: kept
         self.assertEqual((await self.claim())[0].user, self.new)
 
-    async def hold(self, lease=30):
+    async def hold(self, lease=30, retry_after=30.0):
         claimed = await self.claim(lease)
-        await self.store.hold_users("node", [item.token for item in claimed])
+        await self.store.hold_users("node", [item.token for item in claimed], retry_after)
         return claimed
 
-    async def test_held_payload_is_queued_again_while_nothing_newer_was_queued(self):
+    async def test_held_payload_is_claimable_again_after_its_retry_time_at_the_same_revision(self):
         await self.store.enqueue_users("node", [self.old])
-        held = await self.hold()
+        captured, _ = await self.store.capture_queued("node")
+        await self.hold(retry_after=0.05)
         self.assertFalse(await self.store.has_pending("node"))
-        self.assertEqual(await self.store.requeue_held_users("node", held), [])
+        self.assertEqual(await self.claim(), [])
+        self.assertEqual(await self.store.capture_queued("node"), (captured, 0))
+        await asyncio.sleep(0.06)
+        self.assertTrue(await self.store.has_pending("node"))
         again = await self.claim()
         self.assertEqual([item.user for item in again], [self.old])
-        self.assertEqual(await self.store.requeue_held_users("node", held), ["a"])
+        self.assertEqual(await self.store.capture_queued("node"), (captured, 1))
 
     async def test_held_payload_is_superseded_by_a_newer_change_queued_or_delivered(self):
         for deliver in (False, True):
             with self.subTest(deliver=deliver):
                 await self.store.clear("node")
                 await self.store.enqueue_users("node", [self.old])
-                held = await self.hold()
+                await self.hold()
                 await self.store.enqueue_users("node", [self.new])
                 if deliver:
                     newer = await self.claim()
                     await self.store.ack_users("node", [newer[0].token])
-                self.assertEqual(await self.store.requeue_held_users("node", held), ["a"])
                 claimed = await self.claim()
                 self.assertEqual([item.user for item in claimed], [] if deliver else [self.new])
 
@@ -126,37 +129,32 @@ class QueueStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.store.enqueue_users("node", [self.old])
         old = await self.claim()
         await self.store.enqueue_users("node", [self.new])
-        await self.store.hold_users("node", [old[0].token])
-        self.assertEqual(await self.store.requeue_held_users("node", old), ["a"])
+        await self.store.hold_users("node", [old[0].token], 30.0)
         self.assertEqual((await self.claim())[0].user, self.new)
 
-    async def test_only_the_latest_holder_queues_its_payload_again(self):
+    async def test_a_snapshot_retires_a_held_payload_it_captured(self):
         await self.store.enqueue_users("node", [self.old])
-        first = await self.hold()
-        await self.store.enqueue_users("node", [self.new])
-        second = await self.hold()
-        self.assertEqual(await self.store.requeue_held_users("node", first), ["a"])
-        self.assertEqual(await self.store.requeue_held_users("node", second), [])
-        self.assertEqual((await self.claim())[0].user, self.new)
+        await self.hold(retry_after=0.0)
+        captured, _ = await self.store.capture_queued("node")
+        self.assertEqual(await self.store.retire_captured("node", captured), 1)
+        self.assertFalse(await self.store.has_pending("node"))
+        self.assertEqual(await self.claim(), [])
 
-    async def test_clear_and_enqueue_if_absent_supersede_a_held_payload(self):
+    async def test_clear_supersedes_and_enqueue_if_absent_keeps_a_held_payload(self):
         await self.store.enqueue_users("node", [self.old])
-        held = await self.hold()
+        await self.hold(retry_after=0.0)
         await self.store.clear("node")
-        self.assertEqual(await self.store.requeue_held_users("node", held), ["a"])
         self.assertFalse(await self.store.has_pending("node"))
 
         await self.store.enqueue_users("node", [self.old])
-        held = await self.hold()
+        await self.hold(retry_after=0.0)
         await self.store.enqueue_users_if_absent("node", [self.new])
-        self.assertEqual(await self.store.requeue_held_users("node", held), ["a"])
-        self.assertEqual((await self.claim())[0].user, self.new)
+        self.assertEqual((await self.claim())[0].user, self.old)
 
     async def test_an_expired_claim_holds_nothing_and_stays_queued(self):
         await self.store.enqueue_users("node", [self.old])
         expired = await self.claim(0)
-        await self.store.hold_users("node", [expired[0].token])
-        self.assertEqual(await self.store.requeue_held_users("node", expired), ["a"])
+        await self.store.hold_users("node", [expired[0].token], 30.0)
         self.assertEqual((await self.claim())[0].user, self.old)
 
     async def test_requeue_uses_latest_store_payload_not_mutated_claim(self):
@@ -211,6 +209,20 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         node = RecordingNode(user_sync_store=store or InMemoryUserSyncStore(), **kwargs)
         self.nodes.append(node)
         return node
+
+    async def claims(self, node, users):
+        await node._user_sync_store.enqueue_users(node.node_id, users)
+        return await node._user_sync_store.claim_users(node.node_id, "earlier", len(users), 30)
+
+    async def hold_rejected(self, node, user, detail="refused"):
+        claimed = await self.claims(node, [user])
+        node._hold_rejected_user(user, detail, claimed[0].token)
+        await node._hold_claimed_users(claimed)
+
+    def expire_holds(self, node):
+        held = node._user_sync_store._held.get(node.node_id, {})
+        for email in held:
+            held[email] = 0.0
 
     async def test_empty_claim_does_not_erase_concurrent_enqueue_wake(self):
         store = InMemoryUserSyncStore()
@@ -408,6 +420,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         async def retry_now():
             count = len(sends)
             node._sync_retries["a"].next_attempt = 0
+            self.expire_holds(node)
             await node.wake_sync_worker()
             await eventually(lambda: len(sends) > count)
 
@@ -559,25 +572,27 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
         async def queue_due():
             node._sync_retries["x"].next_attempt = 0
+            self.expire_holds(node)
             await node._queue_due_rejected_users()
             self.assertIsNotNone(node._sync_retries["x"].queued_at)
 
-        node._hold_rejected_user(held, "refused")
+        await self.hold_rejected(node, held)
         await queue_due()
         claimed = await store.claim_users("node", "other", 10, 30)
         self.assertEqual([item.user for item in claimed], [held])
-
-        # A store that re-derives current state gets a refresh request, not the held payload.
-        store.request_refresh = AsyncMock()
-        node._hold_rejected_user(held, "refused")
-        await queue_due()
-        store.request_refresh.assert_awaited_once_with("node", ["x"])
+        await store.ack_users("node", [item.token for item in claimed])
 
         # Another worker delivered it: the entry waits for a claim here and is forgotten after the window.
         node._sync_retry_window = 0.05
         await asyncio.sleep(0.06)
         await node._queue_due_rejected_users()
         self.assertEqual(node._sync_retries, {})
+
+        store.hold_users = None
+        store.request_refresh = AsyncMock()
+        node._hold_rejected_user(held, "refused", "acked-claim")
+        await queue_due()
+        store.request_refresh.assert_awaited_once_with("node", ["x"])
 
     async def test_rejected_users_wait_for_a_full_sync_fence(self):
         store = InMemoryUserSyncStore()
@@ -653,12 +668,13 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejected_again_users_are_sent_one_by_one(self):
         node = self.node()
-        self.fast_retries(node)
         sends = self.refuse(node, lambda user: "ss" in user.inbounds)
         emails = [str(i) for i in range(8)]
         for email in emails:
-            node._hold_rejected_user(User(email=email, inbounds=["ss"]), "refused")
+            await self.hold_rejected(node, User(email=email, inbounds=["ss"]))
             node._sync_retries[email].next_attempt = 0
+        self.fast_retries(node)
+        self.expire_holds(node)
         await node.connect("0.2.0", "1.0.0")
         await eventually(lambda: all(node._sync_retries[email].attempts == 2 for email in emails))
         # One send for the batch, then one per user instead of 15 sends to split 8 users.
@@ -684,12 +700,17 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_users_deferred_untested_go_before_retries(self):
         store = InMemoryUserSyncStore()
         node = self.node(store)
-        node._hold_rejected_user(User(email="a", inbounds=["ss"]), "refused")
-        node._sync_retries["a"].next_attempt = 0
-        node._defer_untested_user(User(email="b", inbounds=["vless"]), "refused", alone=True)
+        await self.hold_rejected(node, User(email="a", inbounds=["ss"]))
+        deferred = User(email="b", inbounds=["vless"])
+        claimed = await self.claims(node, [deferred])
+        node._defer_untested_user(deferred, "refused", True, None, claimed[0].token)
+        await node._hold_claimed_users(claimed)
         await node._queue_due_rejected_users()
         claimed = await store.claim_users("node", "other", 10, 30)
-        self.assertEqual([item.user.email for item in claimed], ["b", "a"])
+        self.assertEqual([item.user.email for item in claimed], ["b"])
+        self.expire_holds(node)
+        claimed = await store.claim_users("node", "other", 10, 30)
+        self.assertEqual([item.user.email for item in claimed], ["a"])
 
     async def test_slow_isolation_stops_before_the_round_runs_out(self):
         # 0.75 s per round; each send takes 0.02 s and may take up to 0.3 s.

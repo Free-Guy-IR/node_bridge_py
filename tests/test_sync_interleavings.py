@@ -86,6 +86,9 @@ class InterleavingTests(SyncFakeTestCase):
         self.assertEqual(events["hard_reset_reconnect_in_backoff"], 0)
 
         node._sync_retries["s4"].next_attempt = loop.time()
+        held = node._user_sync_store._held.get(node.node_id, {})
+        if "s4" in held:
+            held["s4"] = 0.0
         await node.wake_sync_worker()
         async with asyncio.timeout(4 * STALL_LEASE):
             while (

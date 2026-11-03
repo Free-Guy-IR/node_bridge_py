@@ -119,7 +119,7 @@ class _RejectedUser:
     reported: bool = False
     alone: bool = False
     group: int | None = None
-    token: str | None = None
+    token: str = ""
 
 
 class _SendTimes:
@@ -250,6 +250,7 @@ class Controller:
 
         # Users the node rejected, keyed by email, queued again after a backoff (one entry per user)
         self._sync_retries: dict[str, _RejectedUser] = {}
+        self._updated_in_round: set[str] = set()
         # First retry delay, doubled up to the cap; after the window an add is retried at the last delay.
         self._sync_retry_delays = (2.0, 60.0, 300.0)
         self._sync_retry_window = 600.0
@@ -355,9 +356,7 @@ class Controller:
     async def update_user(self, user: User):
         """Queue a user for sync. Automatically deduplicates by email."""
         # A newer change replaces any rejected payload held for retry.
-        self._sync_retries.pop(user.email, None)
-        await self._user_sync_store.enqueue_users(self.node_id, [user])
-        self._work_available.set()
+        await self._enqueue_replacing_retries([user])
 
         # Ensure worker is running to process the update
         await self._ensure_sync_worker_running()
@@ -367,14 +366,22 @@ class Controller:
         if not users:
             return
 
-        if self._sync_retries:
-            for user in users:
-                self._sync_retries.pop(user.email, None)
-        await self._user_sync_store.enqueue_users(self.node_id, users)
-        self._work_available.set()
+        await self._enqueue_replacing_retries(users)
 
         # Ensure worker is running to process the updates
         await self._ensure_sync_worker_running()
+
+    async def _enqueue_replacing_retries(self, users: list[User]) -> None:
+        emails = {user.email for user in users}
+        self._updated_in_round.update(emails)
+        replaced = [entry for email in emails if (entry := self._sync_retries.pop(email, None)) is not None]
+        await self._user_sync_store.enqueue_users(self.node_id, users)
+        self._work_available.set()
+        kept = [ClaimedUser(entry.token, entry.user) for entry in replaced if entry.queued_at is None]
+        if kept and self._retry_mode() == "lease":
+            with suppress(Exception):
+                async with asyncio.timeout(self._internal_timeout):
+                    await self._user_sync_store.requeue_users(self.node_id, kept)
 
     async def _try_recover_health_after_sync(
         self, was_broken: bool, was_invalid: bool
@@ -692,7 +699,7 @@ class Controller:
             else:
                 has_pending = getattr(self._user_sync_store, "has_pending", None)
                 if callable(has_pending):
-                    if await has_pending(self.node_id):
+                    if await has_pending(self.node_id) and not self._keeps_claims():
                         self._work_available.set()
                 elif asyncio.get_running_loop().time() < self._recovery_until:
                     # Legacy stores cannot report outstanding leases. Poll through
@@ -731,14 +738,35 @@ class Controller:
             self._work_available.set()
             await self._user_sync_store.requeue_users(self.node_id, claimed_users)
 
-    def _holds_claims(self) -> bool:
+    def _retry_mode(self) -> str:
         store = self._user_sync_store
-        return callable(getattr(store, "hold_users", None)) and callable(getattr(store, "requeue_held_users", None))
+        if callable(getattr(store, "hold_users", None)):
+            return "hold"
+        if callable(getattr(store, "request_refresh", None)):
+            return "refresh"
+        return "lease"
+
+    def _keeps_claims(self) -> bool:
+        return self._retry_mode() == "lease" and any(
+            entry.queued_at is None for entry in self._sync_retries.values()
+        )
 
     async def _hold_claimed_users(self, claimed_users: list[ClaimedUser]):
         if not claimed_users or await self._return_claims_to_a_snapshot(claimed_users):
             return
-        await self._user_sync_store.hold_users(self.node_id, [item.token for item in claimed_users])
+        now = asyncio.get_running_loop().time()
+        delays: dict[float, list[ClaimedUser]] = {}
+        for item in claimed_users:
+            entry = self._sync_retries.get(item.user.email)
+            delay = max(entry.next_attempt - now, 0.0) if entry is not None else 0.0
+            delays.setdefault(delay, []).append(item)
+        for delay, items in delays.items():
+            await self._user_sync_store.hold_users(self.node_id, [item.token for item in items], delay)
+            due = asyncio.get_running_loop().time() + delay
+            for item in items:
+                entry = self._sync_retries.get(item.user.email)
+                if entry is not None and entry.token == item.token:
+                    entry.next_attempt = max(entry.next_attempt, due)
 
     async def _deliver_claimed_users(self, claimed_users: list[ClaimedUser]) -> list[User]:
         users = [item.user for item in claimed_users]
@@ -851,7 +879,7 @@ class Controller:
         entry = self._sync_retries.get(user.email)
         return entry is not None and (entry.attempts > 0 or entry.alone)
 
-    def _hold_rejected_user(self, user: User, detail: str, token: str | None = None) -> None:
+    def _hold_rejected_user(self, user: User, detail: str, token: str) -> None:
         """Keep a user the node rejected out of the queue until its next retry is due.
 
         A rejection can be transient (the node's core API restarting), so it is never final: retries
@@ -885,9 +913,7 @@ class Controller:
         entry.next_attempt = now + (self._sync_retry_delays[2] if late and user.inbounds else entry.delay)
         entry.delay = min(entry.delay * 2, self._sync_retry_delays[1])
 
-    def _defer_untested_user(
-        self, user: User, detail: str, alone: bool, group: int | None = None, token: str | None = None
-    ) -> None:
+    def _defer_untested_user(self, user: User, detail: str, alone: bool, group: int | None, token: str) -> None:
         """Keep a user of a rejected batch that the round had no sends left to test.
 
         Like a rejected user it goes back through the queue, but at the next round, with no attempt
@@ -905,10 +931,15 @@ class Controller:
         entry.queued_at = None
         entry.next_attempt = now
 
-    def _clear_rejected_users(self) -> None:
+    async def _clear_rejected_users(self) -> None:
         """The node was given a full user set: payloads held for retry are older, so forget them."""
+        kept = [ClaimedUser(entry.token, entry.user) for entry in self._sync_retries.values() if entry.queued_at is None]
         self._sync_retries.clear()
         self._sync_rejecting_since = None
+        if kept and self._retry_mode() == "lease":
+            with suppress(Exception):
+                async with asyncio.timeout(self._internal_timeout):
+                    await self._requeue_claimed_users(kept)
 
     def _next_retry_at(self) -> float:
         held = [entry.next_attempt for entry in self._sync_retries.values() if entry.queued_at is None]
@@ -938,43 +969,35 @@ class Controller:
         ]
         for email in stale:
             del self._sync_retries[email]
-        due = [entry for entry in self._sync_retries.values() if entry.queued_at is None and entry.next_attempt <= now]
-        if not due or (await self._fence_state())[0]:
+        mode = self._retry_mode()
+        waiting = [entry for entry in self._sync_retries.values() if entry.queued_at is None]
+        due = [entry for entry in waiting if entry.next_attempt <= now]
+        if mode == "hold":
+            for entry in due:
+                entry.queued_at = now
+            if due:
+                self._work_available.set()
+            return
+        if not waiting:
+            return
+        fenced = (await self._fence_state())[0]
+        if fenced and mode == "lease":
+            due = waiting
+        elif not due or fenced:
             return
         # Users deferred untested go first: unlike a retry, they may be users the node accepts.
         due.sort(key=lambda entry: entry.attempts > 0)
         due = due[: self._sync_batch_size]
-        store = self._user_sync_store
-        held = [entry for entry in due if entry.token is not None]
-        untracked = [entry for entry in due if entry.token is None]
-        superseded: set[str] = set()
         async with asyncio.timeout(self._internal_timeout):
-            if held:
-                superseded.update(
-                    await store.requeue_held_users(
-                        self.node_id, [ClaimedUser(token=entry.token, user=entry.user) for entry in held]
-                    )
+            if mode == "refresh":
+                await self._user_sync_store.request_refresh(self.node_id, [entry.user.email for entry in due])
+            else:
+                await self._user_sync_store.requeue_users(
+                    self.node_id, [ClaimedUser(entry.token, entry.user) for entry in due]
                 )
-            if untracked:
-                await self._queue_untracked_retries([entry.user for entry in untracked])
         for entry in due:
-            email = entry.user.email
-            if email not in superseded:
-                entry.queued_at = now
-            elif self._sync_retries.get(email) is entry:
-                del self._sync_retries[email]
+            entry.queued_at = now
         self._work_available.set()
-
-    async def _queue_untracked_retries(self, users: list[User]) -> None:
-        store = self._user_sync_store
-        refresh = getattr(store, "request_refresh", None)
-        enqueue = getattr(store, "enqueue_users_if_absent", None)
-        if callable(refresh):
-            await refresh(self.node_id, [user.email for user in users])
-        elif callable(enqueue):
-            await enqueue(self.node_id, users)
-        else:
-            await store.enqueue_users(self.node_id, users)
 
     async def _sync_worker(self):
         """Drain bounded batches, retaining wakes and retrying failures with backoff."""
@@ -1005,6 +1028,7 @@ class Controller:
                     # share one deadline ending before another worker can own the lease.
                     budget = self._sync_lease_seconds - min(1.0, self._sync_lease_seconds / 4)
                     self._sync_round_end = loop.time() + budget
+                    self._updated_in_round.clear()
                     async with asyncio.timeout_at(self._sync_round_end):
                         claimed = await self._claim_pending_users()
                         if claimed:
@@ -1023,24 +1047,30 @@ class Controller:
                     # Users the round had no sends left to test are queued again at the next round.
                     isolated = getattr(failed, "isolated", ())
                     deferred = getattr(failed, "deferred", ())
-                    holds = self._holds_claims()
-                    tokens = {item.user.email: item.token for item in claimed} if holds else {}
+                    mode = self._retry_mode()
+                    tokens = {item.user.email: item.token for item in claimed}
                     for user, detail in isolated:
-                        self._hold_rejected_user(user, detail, tokens.get(user.email))
+                        self._hold_rejected_user(user, detail, tokens[user.email])
                     for user, detail in deferred:
                         group, alone = failed.groups.get(user.email, (None, failed.deferred_alone))
-                        self._defer_untested_user(user, detail, alone, group, tokens.get(user.email))
+                        self._defer_untested_user(user, detail, alone, group, tokens[user.email])
                     failed_emails = {user.email for user in failed}
                     kept = {user.email for user, _ in (*isolated, *deferred)}
+                    if mode == "lease":
+                        replaced = kept & self._updated_in_round
+                        for email in replaced:
+                            self._sync_retries.pop(email, None)
+                        kept -= replaced
+                        failed_emails |= replaced
                     if self._sync_retries:
                         for item in claimed:
                             if item.user.email not in failed_emails and item.user.email not in kept:
                                 self._sync_retries.pop(item.user.email, None)
-                    held = kept if holds else set()
-                    released = failed_emails | held
+                    released = failed_emails if mode == "refresh" else failed_emails | kept
                     async with asyncio.timeout(self._internal_timeout):
                         await self._ack_claimed_users([item for item in claimed if item.user.email not in released])
-                        await self._hold_claimed_users([item for item in claimed if item.user.email in held])
+                        if mode == "hold":
+                            await self._hold_claimed_users([item for item in claimed if item.user.email in kept])
                         await self._requeue_claimed_users(
                             [item for item in claimed if item.user.email in failed_emails]
                         )

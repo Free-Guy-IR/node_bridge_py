@@ -305,10 +305,10 @@ class SyncTransportTests(unittest.IsolatedAsyncioTestCase):
         for start in (self.start_grpc, self.start_rest):
             node = await start(lambda emails: None)
             with self.subTest(transport=node.__module__):
-                node._hold_rejected_user(held, "proxy is not a UserManager")
+                node._hold_rejected_user(held, "proxy is not a UserManager", "earlier-claim")
                 await node.sync_users([held])
                 self.assertEqual(node._sync_retries, {})
-                node._hold_rejected_user(held, "proxy is not a UserManager")
+                node._hold_rejected_user(held, "proxy is not a UserManager", "earlier-claim")
                 await node.start(config="{}", backend_type=0, users=[held])
                 self.assertEqual(node._sync_retries, {})
 

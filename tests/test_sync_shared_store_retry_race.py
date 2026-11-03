@@ -16,11 +16,11 @@ class PausingHeldStore(InMemoryUserSyncStore):
         self.release = asyncio.Event()
         self.pause = False
 
-    async def requeue_held_users(self, node_id, held_users):
+    async def hold_users(self, node_id, tokens, retry_after):
         if self.pause:
             self.entered.set()
             await self.release.wait()
-        return await super().requeue_held_users(node_id, held_users)
+        return await super().hold_users(node_id, tokens, retry_after)
 
 
 class SharedStoreRetryRaceTests(unittest.IsolatedAsyncioTestCase):
@@ -163,7 +163,7 @@ class SharedStoreRetryRaceTests(unittest.IsolatedAsyncioTestCase):
         await other.flush_pending_users()
         held._sync_retries["x"].next_attempt = 0
         await held.wake_sync_worker()
-        await eventually(lambda: "x" not in held._sync_retries)
+        await eventually(lambda: held._sync_retries["x"].queued_at is not None)
         await asyncio.sleep(0.1)
 
         self.assertEqual(on_node, {}, sends)
@@ -236,15 +236,11 @@ class SharedStoreRetryRaceTests(unittest.IsolatedAsyncioTestCase):
         store = PausingHeldStore()
         worker, on_node, sends = self.stale_race_workers(store, reject_newer=False)
         node = worker("A")
+        store.pause = True
         await node.update_user(User(email="x", inbounds=["v1"]))
         await node.connect("0.2.0", "1.0.0")
-        await eventually(lambda: "x" in node._sync_retries and node._sync_retries["x"].attempts == 1)
-
-        store.pause = True
-        node._sync_retries["x"].next_attempt = 0
+        await eventually(store.entered.is_set)
         with self.assertNoLogs("sync-test", logging.WARNING):
-            await node.wake_sync_worker()
-            await eventually(store.entered.is_set)
             await change(node)
             store.pause = False
             store.release.set()
