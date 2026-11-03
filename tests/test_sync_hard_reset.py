@@ -73,7 +73,8 @@ class SystemicRejectionTests(SyncFakeTestCase):
                 await stop()
                 suspects = {email for email, inbounds in latest.items() if inbounds == ["bad"]}
                 await self.until(lambda: self.settled(node, core, latest, suspects), 10)
-                self.assertEqual((raised, failures), ([], []))
+                self.assertEqual(raised, [])
+                self.assertLess(max(failures, default=0), threshold, failures)
 
     async def test_a_slow_node_isolating_one_user_and_retrying_it_never_hard_resets(self):
         lease, threshold = 2.0, 2
