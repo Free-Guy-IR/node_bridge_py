@@ -1,6 +1,12 @@
 import asyncio
 import random
+import time
 import unittest
+
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
 
 from PasarGuardNodeBridge.common.service_pb2 import Empty, User
 from PasarGuardNodeBridge.controller import FailedUsers, NodeAPIError
@@ -31,6 +37,7 @@ class RefreshStore(LeaseOnlyStore):
 
 STORES = {"held": InMemoryUserSyncStore, "refresh": RefreshStore, "lease": LeaseOnlyStore}
 KEEPER_WAKE = 7.0
+HELD_DELAY = 1.0
 
 
 def never_back(payloads):
@@ -97,7 +104,7 @@ class SnapshotSupersedesHeldRetryTests(unittest.IsolatedAsyncioTestCase):
             await node._json_client.close()
 
     async def reject_on_first_worker(self, kind, inbounds=("v1",)):
-        fleet = Fleet(STORES[kind](), self.nodes)
+        fleet = Fleet(STORES[kind](), self.nodes, retry_delays=(HELD_DELAY, 60.0, 300.0))
         fleet.refuse.add(("x", tuple(inbounds)))
         held = fleet.worker("A")
         await held.update_user(User(email="x", inbounds=list(inbounds)))
@@ -107,10 +114,7 @@ class SnapshotSupersedesHeldRetryTests(unittest.IsolatedAsyncioTestCase):
         return fleet, held
 
     async def make_due(self, node):
-        node._sync_retries["x"].next_attempt = 0
-        held = node._user_sync_store._held.get("node", {})
-        if "x" in held:
-            held["x"] = 0.0
+        await asyncio.sleep(HELD_DELAY + 0.3)
         await node.wake_sync_worker()
 
     async def settle(self, store):
@@ -135,7 +139,10 @@ class SnapshotSupersedesHeldRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(fleet.on_node, {})
 
                 await self.make_due(held)
-                await eventually(lambda: "x" not in held._sync_retries or held._sync_retries["x"].queued_at)
+                await eventually(
+                    lambda: "x" not in held._sync_retries or held._sync_retries["x"].queued_at,
+                    timeout=9,
+                )
                 await self.settle(fleet.store)
 
                 self.assertEqual(fleet.on_node, {}, fleet.sends)
@@ -332,6 +339,233 @@ class StoreKindRetryTests(unittest.IsolatedAsyncioTestCase):
                 await other.wake_sync_worker()
                 await asyncio.sleep(0.01)
         self.assertEqual(held._sync_retries, {})
+
+
+class LateHoldStore(InMemoryUserSyncStore):
+    async def hold_users(self, node_id, tokens, retry_after):
+        await super().hold_users(node_id, tokens, retry_after + 0.05)
+
+
+class GatedHoldStore(InMemoryUserSyncStore):
+    def __init__(self):
+        super().__init__()
+        self.gate = None
+        self.entered = asyncio.Event()
+
+    async def hold_users(self, node_id, tokens, retry_after):
+        if self.gate is not None:
+            self.entered.set()
+            await self.gate.wait()
+        await super().hold_users(node_id, tokens, retry_after)
+
+
+class GatedEnqueueLeaseStore(LeaseOnlyStore):
+    def __init__(self):
+        super().__init__()
+        self.gate = None
+        self.entered = asyncio.Event()
+
+    async def enqueue_users(self, node_id, users):
+        gate, self.gate = self.gate, None
+        if gate is not None:
+            self.entered.set()
+            await gate.wait()
+        await super().enqueue_users(node_id, users)
+
+
+async def close_all(nodes):
+    for node in nodes:
+        await node.disconnect()
+        await node._json_client.close()
+    nodes.clear()
+
+
+class HeldRetryDueTimeTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.nodes = []
+
+    async def asyncTearDown(self):
+        await close_all(self.nodes)
+
+    async def test_a_hold_that_ends_after_the_controller_due_time_is_still_claimed(self):
+        fleet = Fleet(LateHoldStore(), self.nodes, retry_delays=(0.1, 0.2, 0.2))
+        fleet.refuse.add(("x", ("v1",)))
+        node = fleet.worker("A")
+        await node.update_user(User(email="x", inbounds=["v1"]))
+        await node.connect("0.2.0", "1.0.0")
+        await eventually(lambda: "x" in node._sync_retries)
+        fleet.refuse.clear()
+        await eventually(lambda: fleet.on_node.get("x") == ["v1"], timeout=4)
+        self.assertEqual(fleet.payloads(), [("x", ["v1"]), ("x", ["v1"])], fleet.sends)
+
+
+@unittest.skipUnless(uvloop is not None, "uvloop is not installed")
+class UvloopHeldRetryTests(unittest.TestCase):
+    async def rejected_many_times(self):
+        nodes = []
+        fleet = Fleet(InMemoryUserSyncStore(), nodes, retry_delays=(0.02, 0.05, 0.05))
+        node = fleet.worker("A")
+        send = node.sync_users_chunked
+        attempts = []
+
+        async def flaky(users, **kwargs):
+            attempts.append(len(users))
+            if len(attempts) <= 20:
+                return FailedUsers(users, rejected=True, detail="core restarting")
+            return await send(users, **kwargs)
+
+        node.sync_users_chunked = flaky
+        try:
+            await node.update_user(User(email="x", inbounds=["v1"]))
+            await node.connect("0.2.0", "1.0.0")
+            await eventually(lambda: fleet.on_node.get("x") == ["v1"], timeout=8)
+        finally:
+            await close_all(nodes)
+        return len(attempts)
+
+    def test_repeated_rejections_under_uvloop_end_in_a_delivery(self):
+        for run in range(3):
+            with self.subTest(run=run):
+                with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
+                    self.assertEqual(runner.run(self.rejected_many_times()), 21)
+
+
+class DirectSnapshotRetiresRetriesTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.nodes = []
+
+    async def asyncTearDown(self):
+        await close_all(self.nodes)
+
+    async def direct_snapshot(self, node, users):
+        await node.sync_users(users, flush_pending=False)
+        await node._clear_rejected_users()
+
+    async def unrelated_update_settles(self, fleet, node):
+        await node.update_user(User(email="y", inbounds=["y1"]))
+        await eventually(lambda: fleet.on_node.get("y") == ["y1"])
+        await asyncio.sleep(0.3)
+
+    async def test_a_direct_snapshot_retires_the_retries_it_supersedes(self):
+        for kind in STORES:
+            with self.subTest(store=kind):
+                fleet = Fleet(STORES[kind](), self.nodes, retry_delays=(0.3, 60.0, 300.0))
+                fleet.refuse.add(("x", ("v1",)))
+                node = fleet.worker("A")
+                await node.update_user(User(email="x", inbounds=["v1"]))
+                await node.connect("0.2.0", "1.0.0")
+                await eventually(lambda: "x" in node._sync_retries)
+                await asyncio.sleep(0.05)
+                fleet.refuse.clear()
+                await self.direct_snapshot(node, [User(email="x", inbounds=["v2"])])
+                await asyncio.sleep(0.6)
+                await node.wake_sync_worker()
+                await self.unrelated_update_settles(fleet, node)
+
+                self.assertEqual(fleet.on_node, {"x": ["v2"], "y": ["y1"]}, fleet.sends)
+                self.assertEqual(fleet.payloads().count(("x", ["v1"])), 1, fleet.sends)
+                self.assertEqual(await fleet.store.capture_queued("node"), ({}, 0))
+                await close_all(self.nodes)
+
+    async def test_a_direct_snapshot_during_the_hold_call_retires_the_retry(self):
+        store = GatedHoldStore()
+        fleet = Fleet(store, self.nodes, retry_delays=(0.3, 60.0, 300.0))
+        fleet.refuse.add(("x", ("v1",)))
+        node = fleet.worker("A")
+        store.gate = asyncio.Event()
+        await node.update_user(User(email="x", inbounds=["v1"]))
+        await node.connect("0.2.0", "1.0.0")
+        await eventually(store.entered.is_set)
+        fleet.refuse.clear()
+        await self.direct_snapshot(node, [User(email="x", inbounds=["v2"])])
+        store.gate.set()
+        store.gate = None
+        await asyncio.sleep(0.6)
+        await node.wake_sync_worker()
+        await self.unrelated_update_settles(fleet, node)
+
+        self.assertEqual(fleet.on_node, {"x": ["v2"], "y": ["y1"]}, fleet.sends)
+        self.assertEqual(fleet.payloads().count(("x", ["v1"])), 1, fleet.sends)
+        self.assertEqual(await store.capture_queued("node"), ({}, 0))
+
+
+class LeaseModeRaceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.nodes = []
+
+    async def asyncTearDown(self):
+        await close_all(self.nodes)
+
+    async def test_a_round_started_during_a_slow_enqueue_does_not_hold_back_the_newer_change(self):
+        for trigger in ("connect", "wake"):
+            with self.subTest(trigger=trigger):
+                store = GatedEnqueueLeaseStore()
+                fleet = Fleet(store, self.nodes)
+                fleet.refuse.add(("x", ("v1",)))
+                node = fleet.worker("A")
+                if trigger == "connect":
+                    await node.update_user(User(email="x", inbounds=["v1"]))
+                else:
+                    await node.connect("0.2.0", "1.0.0")
+                    await store.enqueue_users("node", [User(email="x", inbounds=["v1"])])
+                store.gate = gate = asyncio.Event()
+                update = asyncio.create_task(node.update_user(User(email="x", inbounds=["v2"])))
+                await eventually(store.entered.is_set)
+                if trigger == "connect":
+                    await node.connect("0.2.0", "1.0.0")
+                else:
+                    await node.wake_sync_worker()
+                await eventually(lambda: ("x", ["v1"]) in fleet.payloads())
+                await asyncio.sleep(0.05)
+                gate.set()
+                await update
+                await eventually(lambda: fleet.on_node.get("x") == ["v2"], timeout=3)
+                await close_all(self.nodes)
+
+    async def test_a_fence_gets_every_kept_claim_back_in_one_wake(self):
+        store = LeaseOnlyStore()
+        refuse = {f"u{i}" for i in range(12)}
+        on_node = {}
+
+        def worker(name, batch):
+            node = RecordingNode(user_sync_store=store, worker_id=name, sync_lease_seconds=60.0, sync_batch_size=batch)
+            node._sync_poll_interval = 1.0
+            node._sync_retry_delays = (30.0, 60.0, 300.0)
+            self.nodes.append(node)
+
+            async def send(users, **kwargs):
+                if any(user.email in refuse for user in users):
+                    return FailedUsers(users, rejected=True, detail="proxy is not a UserManager")
+                for user in users:
+                    on_node[user.email] = list(user.inbounds)
+                return []
+
+            async def snapshot(users, **kwargs):
+                on_node.clear()
+                for user in users:
+                    on_node[user.email] = list(user.inbounds)
+                return Empty()
+
+            node.sync_users_chunked = send
+            node.sync_users = snapshot
+            return node
+
+        keeper = worker("A", 2)
+        await keeper.update_users([User(email=email, inbounds=["v1"]) for email in sorted(refuse)])
+        await keeper.connect("0.2.0", "1.0.0")
+        await eventually(
+            lambda: len([e for e in keeper._sync_retries.values() if e.queued_at is None and e.attempts]) == 12,
+            timeout=10,
+        )
+        other = worker("B", 100)
+        refuse.clear()
+
+        async def load():
+            return [User(email=f"u{i}", inbounds=["v1"]) for i in range(12)]
+
+        started = time.monotonic()
+        await other.sync_users_from_source(load)
+        self.assertLessEqual(time.monotonic() - started, 6.5)
 
 
 class SharedStoreSnapshotHammerTests(unittest.IsolatedAsyncioTestCase):
