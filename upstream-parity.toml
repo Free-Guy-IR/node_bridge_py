@@ -35,8 +35,8 @@ release = "v0.9.3"
 subject = "feat: add Masque message and integrate into Proxy and utils (#24)"
 status = "deferred"
 owner = "BRIDGE/PANEL-LEAD"
-until = "2026-11-05"
-reason = "upstream puts Masque at Proxy field 7, which the fork uses for Hysteria2; needs Masque at field 12 on node main first"
+until = "2026-11-09"
+reason = "upstream puts Masque at Proxy field 7, which the fork uses for Hysteria2; needs Masque at field 12 on node main first. Re-dated 2026-11-03 from 2026-11-05: NODE-LEAD decides node masque=12 in round 3 and no decision was recorded by 2026-11-03 08:50; re-decide on 2026-11-09 against node main"
 
 [[commit]]
 upstream = "e408d7720b8f3581d4668c5f87887b3d69e66668"
