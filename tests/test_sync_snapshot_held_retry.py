@@ -460,13 +460,15 @@ class DirectSnapshotRetiresRetriesTests(unittest.IsolatedAsyncioTestCase):
                 await eventually(lambda: "x" in node._sync_retries)
                 await asyncio.sleep(0.05)
                 fleet.refuse.clear()
+                snapshot_at = len(fleet.sends)
                 await self.direct_snapshot(node, [User(email="x", inbounds=["v2"])])
                 await asyncio.sleep(0.6)
                 await node.wake_sync_worker()
                 await self.unrelated_update_settles(fleet, node)
 
+                self.assertIn(("x", ["v1"]), fleet.payloads()[:snapshot_at], fleet.sends)
+                self.assertNotIn(("x", ["v1"]), fleet.payloads()[snapshot_at:], fleet.sends)
                 self.assertEqual(fleet.on_node, {"x": ["v2"], "y": ["y1"]}, fleet.sends)
-                self.assertEqual(fleet.payloads().count(("x", ["v1"])), 1, fleet.sends)
                 self.assertEqual(await fleet.store.capture_queued("node"), ({}, 0))
                 await close_all(self.nodes)
 
