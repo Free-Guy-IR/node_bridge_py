@@ -61,9 +61,10 @@ fork = [
     "67b35df2e34ec9fa1090f6d2945d36d592b30f56",
     "e4fe5b12bc40b3c01fe3e9add7ffb873a1d1ed55",
     "c8b6707fb79a431c85bb5b9fff82135b7c40f303",
+    "76f747b0e1b7b3bc3c313a131bf36d6da5246bca",
 ]
 match = "adapted"
-reason = "split into three commits for review; their changed lines equal a01bdbb's"
+reason = "split into three commits for review; their changed lines equal a01bdbb's. 76f747b names a01bdbb in full, since the three cite only the 7-hex prefix and main is not rewritten"
 diverged = [
     "5bba04822561e4761d3de9401f5452e6f9a51e48",
     "d886f425225bfc036761ca665b02cc6cb578d8d4",
@@ -77,11 +78,31 @@ diverged = [
     "314c285291c1c5d4c4f15bc043e6db7ac8d3b5c5",
     "2808122c176567fe7cb919a6bb3f7af0ceaebe5b",
     "b67402c88c228868c104c5e60b761f5becc1970e",
+    "dd7906adb56e67f3a944130f83287dd646a8f6d4",
+    "8d863e3aaa8c026184ebd5fff9f5dca553a0ad48",
 ]
-divergence = "a01bdbb and the fork both keep each rejected user's backoff in an in-memory per-node map, and a store with request_refresh (on the fork, one without both hold_users and retire_held) is acked and asked to refresh the user when due on both (upstream behaviour). The fork diverges for the other stores: when due, a01bdbb queues the held payload again (enqueue_users_if_absent or enqueue_users), while the fork never queues a held payload under a new revision. A store with hold_users and retire_held keeps the claimed entry queued at its revision, unclaimable until due, and a snapshot retires it (6322313; 9e6cd12 through b67402c fix its due, snapshot, fence and batching paths); any other store keeps the claim leased for the backoff or one lease, whichever ends first (README store contract). 448eb04 keeps a held retry from replacing a newer change another worker queued or delivered, and 013202e keeps a retry superseded while it was re-queued from failing the round. The fork also keeps isolation progress across rounds on slow nodes (5bba048) and hard-resets a node that rejects every user (d886f42, 3eee262), which upstream does not"
+divergence = "a01bdbb and the fork both keep each rejected user's backoff in an in-memory per-node map, and a store with request_refresh (on the fork, one without both hold_users and retire_held) is acked and asked to refresh the user when due on both (upstream behaviour). The fork diverges for the other stores: when due, a01bdbb queues the held payload again (enqueue_users_if_absent or enqueue_users), while the fork never queues a held payload under a new revision. A store with hold_users and retire_held keeps the claimed entry queued at its revision, unclaimable until due, and a snapshot retires it (6322313; 9e6cd12 through b67402c fix its due, snapshot, fence and batching paths); any other store keeps the claim leased for the backoff or one lease, whichever ends first (README store contract). 448eb04 keeps a held retry from replacing a newer change another worker queued or delivered, and 013202e keeps a retry superseded while it was re-queued from failing the round. The fork also keeps isolation progress across rounds on slow nodes (5bba048) and hard-resets a node that rejects every user (d886f42, 3eee262), which upstream does not. dd7906a and 8d863e3 rewrite the README store contract and round-failure text to match"
 
 [[commit]]
 upstream = "f892a5ccb6cff597ec233854dea7abc46981d1bb"
 release = "v0.9.4"
 subject = "bump to v0.9.4"
 status = "version-only"
+
+[[unreleased]]
+upstream = "3f4ca0a52feeb3f450a2abc425328f9b03e932d0"
+branch = "shared-storage"
+subject = "feat: Add shared storage and lifecycle coordination"
+status = "waived"
+checked = 2026-11-03
+owner = "BRIDGE"
+reason = "only on upstream branch shared-storage (head c82f1d5); checked 2026-11-03 21:30 +0330 that no upstream release tag v0.9.0 through v0.9.4 contains it, so the release-only porting rule does not take it. The checker fails this row the day an upstream release ships it, and it is then owed"
+
+[[unreleased]]
+upstream = "c82f1d5aa3e04c47ef9bb70cae4fc43c2dbc3f4f"
+branch = "shared-storage"
+subject = "feat: Enhance lifecycle coordination with exclusive update operations and default stores"
+status = "waived"
+checked = 2026-11-03
+owner = "BRIDGE"
+reason = "head of upstream branch shared-storage; checked 2026-11-03 21:30 +0330 that no upstream release tag v0.9.0 through v0.9.4 contains it, so the release-only porting rule does not take it. The checker fails this row the day an upstream release ships it, and it is then owed"
