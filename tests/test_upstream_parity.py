@@ -36,6 +36,9 @@ class FakeGit:
         self.patch_ids = {U_SYNC: "p-sync", F_SYNC: "p-sync", U_TIMEOUT: "p-timeout", F_TIMEOUT: "p-timeout"}
         self.messages = {F_SYNC: "fix: sync\n", F_TIMEOUT: "fix: timeout\n", F_ELSEWHERE: "x\n"}
         self.diffs = {U_BUMP2: V_LINES, U_BUMP3: V3_LINES}
+        self.reverts = set()
+        self.added = {}
+        self.files = {}
 
     def is_shallow(self):
         return False
@@ -54,6 +57,15 @@ class FakeGit:
 
     def diff_lines(self, sha):
         return self.diffs.get(sha, ["+code = 1"])
+
+    def reverted(self, head):
+        return set(self.reverts)
+
+    def added_lines(self, sha):
+        return self.added.get(sha, {})
+
+    def file_lines(self, head, path):
+        return self.files.get(path)
 
 
 def make_snapshot():
@@ -196,8 +208,72 @@ class UpstreamParityTests(unittest.TestCase):
         item["reason"] = "rebased onto the fork's heartbeat"
         git = FakeGit()
         git.patch_ids[F_TIMEOUT] = "p-other"
-        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "cites the upstream SHA")
-        git.messages[F_TIMEOUT] = f"fix: timeout\n\nUpstream {U_TIMEOUT[:7]}, adapted.\n"
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "cites the full upstream SHA")
+        git.messages[F_TIMEOUT] = f"fix: timeout\n\nUpstream {U_TIMEOUT}, adapted.\n"
+        self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+        git.messages[F_TIMEOUT] = f"fix: timeout\n\nUpstream: {U_TIMEOUT}\n"
+        self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+
+    def test_adapted_port_citing_only_a_short_prefix_fails(self):
+        ledger = make_ledger()
+        item = entry(ledger, U_TIMEOUT)
+        item["match"] = "adapted"
+        item["reason"] = "rebased onto the fork's heartbeat"
+        git = FakeGit()
+        for message in (
+            f"fix: timeout\n\nUpstream {U_TIMEOUT[:7]}, adapted.\n",
+            f"fix: timeout\n\nUpstream: {U_TIMEOUT[:12]}\n",
+            f"fix: timeout\n\nnot {U_TIMEOUT[:39]}\n",
+        ):
+            git.messages[F_TIMEOUT] = message
+            self.assertFailsWith(self.run_check(ledger=ledger, git=git), "cites the full upstream SHA")
+
+    def test_reverted_port_fails(self):
+        git = FakeGit()
+        git.reverts = {F_TIMEOUT}
+        self.assertFailsWith(self.run_check(git=git), f"fork commit {F_TIMEOUT[:10]} is reverted")
+
+    def test_reverted_port_cited_by_a_short_sha_fails(self):
+        git = FakeGit()
+        git.reverts = {F_TIMEOUT[:7]}
+        self.assertFailsWith(self.run_check(git=git), f"fork commit {F_TIMEOUT[:10]} is reverted")
+
+    def test_port_whose_lines_are_gone_at_head_fails(self):
+        git = FakeGit()
+        git.added[F_TIMEOUT] = {"bridge.py": ["    timeout = 330", ""]}
+        git.files["bridge.py"] = {"timeout = 30"}
+        self.assertFailsWith(self.run_check(git=git), "are gone at HEAD")
+        git.files.pop("bridge.py")
+        self.assertFailsWith(self.run_check(git=git), "are gone at HEAD")
+
+    def test_port_whose_lines_are_present_at_head_passes(self):
+        git = FakeGit()
+        git.added[F_TIMEOUT] = {"bridge.py": ["    timeout = 330", ""]}
+        git.files["bridge.py"] = {"timeout = 330", "x = 1"}
+        self.assertEqual(self.run_check(git=git).failures, [])
+
+    def test_port_lines_a_later_port_removed_pass(self):
+        git = FakeGit()
+        git.added[F_SYNC] = {"sync.py": ["requeue(user)"]}
+        git.files["sync.py"] = {"hold(user)"}
+        git.diffs[F_TIMEOUT] = ["-requeue(user)", "+hold(user)"]
+        self.assertEqual(self.run_check(git=git).failures, [])
+
+    def test_port_lines_removed_by_an_unnamed_commit_fail(self):
+        git = FakeGit()
+        git.added[F_SYNC] = {"sync.py": ["requeue(user)"]}
+        git.files["sync.py"] = {"hold(user)"}
+        git.diffs[F_ELSEWHERE] = ["-requeue(user)", "+hold(user)"]
+        self.assertFailsWith(self.run_check(git=git), "are gone at HEAD")
+
+    def test_port_lines_a_diverged_commit_removed_pass(self):
+        ledger = make_ledger()
+        entry(ledger, U_SYNC).update(diverged=[F_DIVERGE], divergence="retries are held in the store")
+        git = FakeGit()
+        git.added[F_SYNC] = {"sync.py": ["requeue(user)"]}
+        git.files["sync.py"] = {"hold(user)"}
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "are gone at HEAD")
+        git.diffs[F_DIVERGE] = ["-requeue(user)", "+hold(user)"]
         self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
 
     def test_divergence_with_fork_commits_in_history_passes(self):
@@ -224,6 +300,56 @@ class UpstreamParityTests(unittest.TestCase):
         ledger = make_ledger()
         entry(ledger, U_SYNC)["divergence"] = "retries are held in the store"
         self.assertFailsWith(self.run_check(ledger=ledger), "non-empty `diverged` list")
+
+    def unreleased_ledger(self, **fields):
+        ledger = make_ledger()
+        row = {
+            "upstream": U_DEV,
+            "branch": "dev",
+            "subject": "wip",
+            "status": "waived",
+            "checked": datetime.date(2026, 11, 2),
+            "owner": "BRIDGE",
+            "reason": "on no upstream release",
+        }
+        row.update(fields)
+        ledger["unreleased"] = [row]
+        return ledger
+
+    def test_unreleased_waiver_of_a_branch_only_commit_passes(self):
+        report = self.run_check(ledger=self.unreleased_ledger())
+        self.assertEqual(report.failures, [])
+        self.assertTrue(any("waived as non-release" in note and U_DEV[:10] in note for note in report.notes))
+
+    def test_unreleased_waiver_of_a_commit_a_release_now_ships_fails(self):
+        snapshot = make_snapshot()
+        snapshot.dev_only["dev"] = []
+        snapshot.ranges["v0.9.3"].append(parity.Commit(U_DEV, "wip"))
+        report = self.run_check(ledger=self.unreleased_ledger(), snapshot=snapshot)
+        self.assertFailsWith(report, f"{U_DEV[:10]} now ships in upstream release v0.9.3")
+
+    def test_unreleased_waiver_on_the_wrong_branch_fails(self):
+        self.assertFailsWith(
+            self.run_check(ledger=self.unreleased_ledger(branch="main")), "is not a commit only on upstream main"
+        )
+
+    def test_unreleased_waiver_without_a_date_fails(self):
+        ledger = self.unreleased_ledger()
+        del ledger["unreleased"][0]["checked"]
+        self.assertFailsWith(self.run_check(ledger=ledger), "`checked` must be a YYYY-MM-DD date")
+
+    def test_unreleased_waiver_dated_in_the_future_fails(self):
+        ledger = self.unreleased_ledger(checked=datetime.date(2026, 11, 9))
+        self.assertFailsWith(self.run_check(ledger=ledger), "is after today")
+
+    def test_unreleased_row_must_be_waived_with_owner_and_reason(self):
+        self.assertFailsWith(self.run_check(ledger=self.unreleased_ledger(status="ported")), "must be waived")
+        self.assertFailsWith(self.run_check(ledger=self.unreleased_ledger(owner=" ")), "needs `owner`")
+        self.assertFailsWith(self.run_check(ledger=self.unreleased_ledger(reason="")), "needs `reason`")
+
+    def test_unreleased_row_that_duplicates_a_release_row_fails(self):
+        ledger = self.unreleased_ledger(upstream=U_TIMEOUT)
+        self.assertFailsWith(self.run_check(ledger=ledger), "listed twice")
 
     def test_version_only_with_a_code_change_fails(self):
         git = FakeGit()
@@ -321,6 +447,9 @@ class UpstreamParityTests(unittest.TestCase):
         for item in ledger["commit"]:
             self.assertRegex(item["upstream"], r"^[0-9a-f]{40}$")
             self.assertIn(item["status"], parity.STATUSES)
+        for item in ledger.get("unreleased", []):
+            self.assertRegex(item["upstream"], r"^[0-9a-f]{40}$")
+            self.assertEqual(item["status"], "waived")
         tags = [item["tag"] for item in ledger["release"]]
         self.assertIn(ledger["upstream"]["floor"], tags)
         self.assertEqual(len(tags), len(set(tags)))

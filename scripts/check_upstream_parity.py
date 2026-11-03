@@ -21,7 +21,8 @@ FINAL_VERSION = re.compile(r"^v?(\d+(?:\.\d+)*)$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 VERSION_LINE = re.compile(r'^([+-])\s*(?:Version:\s*|__version__\s*=\s*|version\s*=\s*)"?(\d[0-9A-Za-z.+-]*)"?\s*$')
-HEX_TOKEN = re.compile(r"\b[0-9a-f]{7,40}\b")
+FULL_SHA_TOKEN = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
+REVERT = re.compile(r"This reverts commit ([0-9a-f]{7,40})")
 STATUSES = ("ported", "version-only", "waived", "deferred")
 COMPLETE = ("ported", "version-only", "waived")
 MATCHES = ("patch-id", "adapted")
@@ -149,6 +150,27 @@ class Git:
         diff = self.run("show", "--format=", "--no-color", "--no-ext-diff", "--unified=0", sha).stdout
         return [line for line in diff.splitlines() if line[:1] in "+-" and not line.startswith(("+++ ", "--- "))]
 
+    def reverted(self, head: str) -> set[str]:
+        return set(REVERT.findall(self.run("log", "--format=%B", head, "--").stdout))
+
+    def added_lines(self, sha: str) -> dict[str, list[str]]:
+        diff = self.run("show", "--format=", "--no-color", "--no-ext-diff", "--no-renames", "--unified=0", sha).stdout
+        added: dict[str, list[str]] = {}
+        path = None
+        for line in diff.splitlines():
+            if line.startswith("+++ "):
+                target = line[4:]
+                path = target[2:] if target.startswith("b/") else None
+            elif line.startswith("+") and path is not None:
+                added.setdefault(path, []).append(line[1:])
+        return added
+
+    def file_lines(self, head: str, path: str) -> set[str] | None:
+        result = self.run("show", f"{head}:{path}", check=False)
+        if result.returncode != 0:
+            return None
+        return {line.strip() for line in result.stdout.splitlines()}
+
     def rev_list(self, include: list[str], exclude: list[str]) -> list[Commit]:
         args = ["log", "--format=%H%x09%s", *include]
         if exclude:
@@ -252,7 +274,7 @@ def read_versions(root: Path) -> dict[str, str]:
     return versions
 
 
-def parse_date(value, label: str, report: Report) -> datetime.date | None:
+def parse_date(value, label: str, report: Report, field: str = "until") -> datetime.date | None:
     if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
         return value
     if isinstance(value, str):
@@ -260,7 +282,7 @@ def parse_date(value, label: str, report: Report) -> datetime.date | None:
             return datetime.date.fromisoformat(value)
         except ValueError:
             pass
-    report.fail(f"{label}: `until` must be a YYYY-MM-DD date, got {value!r}")
+    report.fail(f"{label}: `{field}` must be a YYYY-MM-DD date, got {value!r}")
     return None
 
 
@@ -291,7 +313,48 @@ def check_divergence(entry: dict, label: str, git: Git, head: str, report: Repor
         report.fail(f"{label}: a `diverged` list needs a `divergence` text saying how the fork differs")
 
 
-def check_ported(entry: dict, label: str, git: Git, head: str, report: Report) -> None:
+def named_fork_commits(entries) -> set[str]:
+    named: set[str] = set()
+    for entry in entries:
+        if entry.get("status") != "ported":
+            continue
+        for field in ("fork", "diverged"):
+            shas = entry.get(field)
+            if isinstance(shas, list):
+                named.update(sha for sha in shas if isinstance(sha, str) and SHA.match(sha))
+    return named
+
+
+def removed_lines(shas: set[str], git: Git, head: str) -> set[str]:
+    return {
+        line[1:].strip()
+        for sha in sorted(shas)
+        if git.has_commit(sha) and git.is_ancestor(sha, head)
+        for line in git.diff_lines(sha)
+        if line.startswith("-")
+    }
+
+
+def check_still_applied(fork: list[str], removed: set[str], label: str, git: Git, head: str, report: Report) -> None:
+    reverted = git.reverted(head)
+    for sha in fork:
+        tokens = sorted(token for token in reverted if sha.startswith(token))
+        if tokens:
+            report.fail(f"{label}: fork commit {sha[:10]} is reverted in the history of {head[:10]} ({tokens[0]})")
+    for sha in fork:
+        for path, lines in sorted(git.added_lines(sha).items()):
+            present = git.file_lines(head, path) or set()
+            gone = [
+                line for line in lines if line.strip() and line.strip() not in present and line.strip() not in removed
+            ]
+            if gone:
+                report.fail(
+                    f"{label}: {len(gone)} line(s) fork commit {sha[:10]} added to {path} are gone at HEAD and no"
+                    f" ledger `fork` or `diverged` commit removed them, first {gone[0].strip()[:100]!r}"
+                )
+
+
+def check_ported(entry: dict, label: str, git: Git, head: str, removed: set[str], report: Report) -> None:
     upstream_sha = entry["upstream"]
     fork = entry.get("fork")
     if not isinstance(fork, list) or not fork:
@@ -299,6 +362,7 @@ def check_ported(entry: dict, label: str, git: Git, head: str, report: Report) -
         return
     if not fork_commits_in_history(fork, label, git, head, report):
         return
+    check_still_applied(fork, removed, label, git, head, report)
     match = entry.get("match")
     if match not in MATCHES:
         report.fail(f"{label}: ported entry needs `match` = one of {', '.join(MATCHES)}")
@@ -310,9 +374,12 @@ def check_ported(entry: dict, label: str, git: Git, head: str, report: Report) -
         return
     if not str(entry.get("reason", "")).strip():
         report.fail(f"{label}: an adapted port needs a `reason`")
-    cited = any(upstream_sha.startswith(token) for sha in fork for token in HEX_TOKEN.findall(git.message(sha)))
+    cited = any(upstream_sha in FULL_SHA_TOKEN.findall(git.message(sha)) for sha in fork)
     if not cited:
-        report.fail(f"{label}: an adapted port needs a fork commit whose message cites the upstream SHA")
+        report.fail(
+            f"{label}: an adapted port needs a fork commit whose message cites the full upstream SHA"
+            f" {upstream_sha} (or an `Upstream: {upstream_sha}` trailer)"
+        )
 
 
 def check_version_only(entry: dict, label: str, release: str, git: Git, report: Report) -> None:
@@ -331,7 +398,14 @@ def check_version_only(entry: dict, label: str, release: str, git: Git, report: 
 
 
 def check_entry(
-    entry: dict, label: str, release: str, git: Git, head: str, today: datetime.date, report: Report
+    entry: dict,
+    label: str,
+    release: str,
+    git: Git,
+    head: str,
+    today: datetime.date,
+    removed: set[str],
+    report: Report,
 ) -> None:
     status = entry.get("status")
     if status not in STATUSES:
@@ -339,7 +413,7 @@ def check_entry(
         return
     check_divergence(entry, label, git, head, report)
     if status == "ported":
-        check_ported(entry, label, git, head, report)
+        check_ported(entry, label, git, head, removed, report)
     elif status == "version-only":
         check_version_only(entry, label, release, git, report)
     else:
@@ -357,6 +431,48 @@ def check_entry(
         report.fail(f"{label}: deferral until {until.isoformat()} is more than {MAX_DEFERRAL_DAYS} days away")
     else:
         report.note(f"deferred until {until.isoformat()} ({(until - today).days} day(s) left), {label}")
+
+
+def check_unreleased(
+    rows: list,
+    entries: dict[str, dict],
+    owner_release: dict[str, str],
+    snapshot: Snapshot,
+    today: datetime.date,
+    report: Report,
+) -> set[str]:
+    waived: set[str] = set()
+    for row in rows:
+        sha = row.get("upstream")
+        if not isinstance(sha, str) or not SHA.match(sha):
+            report.fail(f"ledger unreleased row has a malformed upstream SHA: {sha!r}")
+            continue
+        branch = str(row.get("branch", ""))
+        label = f"unreleased {branch} {sha[:10]} {row.get('subject', '')!r}"
+        if sha in entries or sha in waived:
+            report.fail(f"upstream commit {sha[:10]} is listed twice in the ledger")
+            continue
+        waived.add(sha)
+        if sha in owner_release:
+            report.fail(
+                f"{label}: {sha[:10]} now ships in upstream release {owner_release[sha]}; it is owed, move it to a"
+                " [[commit]] row and port it"
+            )
+            continue
+        if sha not in {commit.sha for commit in snapshot.dev_only.get(branch, [])}:
+            report.fail(f"{label}: {sha[:10]} is not a commit only on upstream {branch or '(no branch)'}")
+            continue
+        if row.get("status") != "waived":
+            report.fail(f"{label}: a commit on no upstream release must be waived, got {row.get('status')!r}")
+        for field in ("reason", "owner"):
+            if not str(row.get(field, "")).strip():
+                report.fail(f"{label}: an unreleased waiver needs `{field}`")
+        checked = parse_date(row.get("checked"), label, report, "checked")
+        if checked is not None and checked > today:
+            report.fail(f"{label}: checked {checked.isoformat()} is after today {today.isoformat()}")
+        elif checked is not None:
+            report.note(f"waived as non-release (checked {checked.isoformat()}): {label}")
+    return waived
 
 
 def check_version_claim(
@@ -452,6 +568,7 @@ def evaluate(
         entries[sha] = item
 
     owner_release = {commit.sha: name for name, commits in snapshot.ranges.items() for commit in commits}
+    removed = removed_lines(named_fork_commits(entries.values()), git, head)
     for name in sorted(snapshot.ranges, key=lambda n: version_key(n) or ()):
         for commit in snapshot.ranges[name]:
             entry = entries.get(commit.sha)
@@ -461,10 +578,12 @@ def evaluate(
                 continue
             if entry.get("release") != name:
                 report.fail(f"{label}: ledger files it under {entry.get('release')!r}, upstream ships it in {name}")
-            check_entry(entry, label, name, git, head, today, report)
+            check_entry(entry, label, name, git, head, today, removed, report)
     for sha, entry in entries.items():
         if sha not in owner_release:
             report.fail(f"ledger commit {sha[:10]} is not in any upstream release at or above {floor}")
+
+    waived = check_unreleased(ledger.get("unreleased", []), entries, owner_release, snapshot, today, report)
 
     for source, published in sorted(snapshot.published.items()):
         for version in sorted(published):
@@ -480,11 +599,12 @@ def evaluate(
     for name, sha in sorted(snapshot.non_final_tags.items()):
         report.note(f"non-final upstream tag {name} ({sha[:10]}) is not tracked; port only from final releases")
     for branch, commits in snapshot.dev_only.items():
+        commits = [commit for commit in commits if commit.sha not in waived]
         if commits:
             listed = "; ".join(f"{c.sha[:10]} {c.subject}" for c in commits)
             report.note(f"dev-only on upstream {branch} ({len(commits)} commit(s), in no release): {listed}")
         else:
-            report.note(f"upstream {branch} has no commit outside a release")
+            report.note(f"upstream {branch} has no unrecorded commit outside a release")
 
     check_version_claim(versions, floor, snapshot, entries, report)
     return report
