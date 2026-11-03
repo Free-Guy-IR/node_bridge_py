@@ -150,8 +150,15 @@ class Git:
         diff = self.run("show", "--format=", "--no-color", "--no-ext-diff", "--unified=0", sha).stdout
         return [line for line in diff.splitlines() if line[:1] in "+-" and not line.startswith(("+++ ", "--- "))]
 
-    def reverted(self, head: str) -> set[str]:
-        return set(REVERT.findall(self.run("log", "--format=%B", head, "--").stdout))
+    def reverted(self, head: str) -> dict[str, tuple[str, ...]]:
+        output = self.run("log", "--format=%H%x00%B%x1e", head, "--").stdout
+        reverts: dict[str, tuple[str, ...]] = {}
+        for record in output.split("\x1e"):
+            sha, _, body = record.strip().partition("\x00")
+            targets = tuple(REVERT.findall(body))
+            if sha and targets:
+                reverts[sha] = targets
+        return reverts
 
     def added_lines(self, sha: str) -> dict[str, list[str]]:
         diff = self.run("show", "--format=", "--no-color", "--no-ext-diff", "--no-renames", "--unified=0", sha).stdout
@@ -335,12 +342,57 @@ def removed_lines(shas: set[str], git: Git, head: str) -> set[str]:
     }
 
 
+def live_revert(sha: str, reverts: dict[str, tuple[str, ...]], seen: set[str]) -> str | None:
+    if sha in seen:
+        return None
+    seen = seen | {sha}
+    for reverter, targets in sorted(reverts.items()):
+        if any(sha.startswith(target) for target in targets) and live_revert(reverter, reverts, seen) is None:
+            return reverter
+    return None
+
+
+def normalise(line: str) -> str:
+    return " ".join(line.split())
+
+
+def check_adapted_lines(entry: dict, label: str, fork: list[str], git: Git, report: Report) -> None:
+    carriers = [sha for sha in fork if git.diff_lines(sha)]
+    if not carriers:
+        report.fail(f"{label}: every fork commit is empty, so none carries upstream {entry['upstream'][:10]}'s lines")
+        return
+    carried = {normalise(line) for sha in carriers for lines in git.added_lines(sha).values() for line in lines}
+    upstream = {
+        normalise(line) for lines in git.added_lines(entry["upstream"]).values() for line in lines if line.strip()
+    }
+    excused: set[str] = set()
+    for item in entry.get("diverged_lines", []):
+        line = normalise(str(item.get("line", ""))) if isinstance(item, dict) else ""
+        if not line:
+            report.fail(f"{label}: a `diverged_lines` item needs a non-empty `line`")
+            continue
+        if not str(item.get("reason", "")).strip():
+            report.fail(f"{label}: diverged line {line[:80]!r} needs a `reason`")
+            continue
+        if line not in upstream:
+            report.fail(f"{label}: diverged line {line[:80]!r} is not an upstream added line")
+        elif line in carried:
+            report.fail(f"{label}: diverged line {line[:80]!r} is listed, but the fork commits carry it")
+        excused.add(line)
+    missing = sorted(upstream - carried - excused)
+    if missing:
+        report.fail(
+            f"{label}: {len(missing)} line(s) upstream {entry['upstream'][:10]} added are in no non-empty fork"
+            f" commit and not listed in `diverged_lines`, first {missing[0][:100]!r}"
+        )
+
+
 def check_still_applied(fork: list[str], removed: set[str], label: str, git: Git, head: str, report: Report) -> None:
-    reverted = git.reverted(head)
+    reverts = git.reverted(head)
     for sha in fork:
-        tokens = sorted(token for token in reverted if sha.startswith(token))
-        if tokens:
-            report.fail(f"{label}: fork commit {sha[:10]} is reverted in the history of {head[:10]} ({tokens[0]})")
+        reverter = live_revert(sha, reverts, set())
+        if reverter:
+            report.fail(f"{label}: fork commit {sha[:10]} is reverted in the history of {head[:10]} ({reverter[:10]})")
     for sha in fork:
         for path, lines in sorted(git.added_lines(sha).items()):
             present = git.file_lines(head, path) or set()
@@ -374,6 +426,7 @@ def check_ported(entry: dict, label: str, git: Git, head: str, removed: set[str]
         return
     if not str(entry.get("reason", "")).strip():
         report.fail(f"{label}: an adapted port needs a `reason`")
+    check_adapted_lines(entry, label, fork, git, report)
     cited = any(upstream_sha in FULL_SHA_TOKEN.findall(git.message(sha)) for sha in fork)
     if not cited:
         report.fail(

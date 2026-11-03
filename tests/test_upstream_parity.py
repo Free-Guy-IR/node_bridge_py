@@ -36,7 +36,7 @@ class FakeGit:
         self.patch_ids = {U_SYNC: "p-sync", F_SYNC: "p-sync", U_TIMEOUT: "p-timeout", F_TIMEOUT: "p-timeout"}
         self.messages = {F_SYNC: "fix: sync\n", F_TIMEOUT: "fix: timeout\n", F_ELSEWHERE: "x\n"}
         self.diffs = {U_BUMP2: V_LINES, U_BUMP3: V3_LINES}
-        self.reverts = set()
+        self.reverts = {}
         self.added = {}
         self.files = {}
 
@@ -59,7 +59,7 @@ class FakeGit:
         return self.diffs.get(sha, ["+code = 1"])
 
     def reverted(self, head):
-        return set(self.reverts)
+        return dict(self.reverts)
 
     def added_lines(self, sha):
         return self.added.get(sha, {})
@@ -230,13 +230,81 @@ class UpstreamParityTests(unittest.TestCase):
 
     def test_reverted_port_fails(self):
         git = FakeGit()
-        git.reverts = {F_TIMEOUT}
+        git.reverts = {"7" * 40: (F_TIMEOUT,)}
         self.assertFailsWith(self.run_check(git=git), f"fork commit {F_TIMEOUT[:10]} is reverted")
 
     def test_reverted_port_cited_by_a_short_sha_fails(self):
         git = FakeGit()
-        git.reverts = {F_TIMEOUT[:7]}
+        git.reverts = {"7" * 40: ("0" * 7, F_TIMEOUT[:7])}
         self.assertFailsWith(self.run_check(git=git), f"fork commit {F_TIMEOUT[:10]} is reverted")
+
+    def test_revert_of_a_revert_reapplies_the_port(self):
+        git = FakeGit()
+        git.reverts = {"7" * 40: (F_TIMEOUT,), "8" * 40: (("7" * 40)[:8],)}
+        self.assertEqual(self.run_check(git=git).failures, [])
+        git.reverts["9" * 40] = ("8" * 40,)
+        self.assertFailsWith(self.run_check(git=git), f"fork commit {F_TIMEOUT[:10]} is reverted")
+
+    def test_reapplied_port_is_judged_by_its_lines_at_head(self):
+        git = FakeGit()
+        git.reverts = {"7" * 40: (F_TIMEOUT,), "8" * 40: ("7" * 40,)}
+        git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330"]}
+        git.files["bridge.py"] = {"timeout = 30"}
+        self.assertFailsWith(self.run_check(git=git), "are gone at HEAD")
+        git.files["bridge.py"] = {"timeout = 330"}
+        self.assertEqual(self.run_check(git=git).failures, [])
+
+    def adapted(self, git):
+        ledger = make_ledger()
+        entry(ledger, U_TIMEOUT).update(match="adapted", reason="split for review")
+        git.patch_ids[F_TIMEOUT] = "p-other"
+        git.messages[F_TIMEOUT] = f"fix: timeout\n\nUpstream: {U_TIMEOUT}\n"
+        git.added[U_TIMEOUT] = {"bridge.py": ["    timeout = 330", "", "    retry(user)"]}
+        present = {"timeout = 330", "timeout  =  330", "retry(user)"}
+        git.files.update({"bridge.py": present, "pkg/bridge.py": present})
+        return ledger
+
+    def test_adapted_port_of_only_empty_commits_fails(self):
+        git = FakeGit()
+        ledger = self.adapted(git)
+        git.diffs[F_TIMEOUT] = []
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "every fork commit is empty")
+        git.added.pop(U_TIMEOUT)
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "every fork commit is empty")
+
+    def test_adapted_port_must_carry_the_upstream_added_lines(self):
+        git = FakeGit()
+        ledger = self.adapted(git)
+        git.added[F_TIMEOUT] = {"pkg/bridge.py": ["timeout  =  330"]}
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "1 line(s) upstream")
+        git.added[F_TIMEOUT]["pkg/bridge.py"].append("\tretry(user)")
+        self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+
+    def test_adapted_port_lines_of_an_empty_commit_do_not_count(self):
+        git = FakeGit()
+        ledger = self.adapted(git)
+        entry(ledger, U_TIMEOUT)["fork"] = [F_TIMEOUT, F_DIVERGE]
+        git.messages[F_DIVERGE] = "x\n"
+        git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330"]}
+        git.added[F_DIVERGE] = {"bridge.py": ["retry(user)"]}
+        git.diffs[F_DIVERGE] = []
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "1 line(s) upstream")
+
+    def test_adapted_port_line_listed_as_diverged_passes(self):
+        git = FakeGit()
+        ledger = self.adapted(git)
+        item = entry(ledger, U_TIMEOUT)
+        git.added[F_TIMEOUT] = {"bridge.py": ["timeout = 330"]}
+        item["diverged_lines"] = [{"line": "retry(user)"}]
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "needs a `reason`")
+        item["diverged_lines"] = [{"line": "retry( user )", "reason": "held in the store"}]
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "1 line(s) upstream")
+        item["diverged_lines"] = [{"line": "  retry(user) ", "reason": "held in the store"}]
+        self.assertEqual(self.run_check(ledger=ledger, git=git).failures, [])
+        item["diverged_lines"].append({"line": "timeout = 330", "reason": "stale"})
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "the fork commits carry it")
+        item["diverged_lines"] = [{"line": "never = upstream", "reason": "stale"}]
+        self.assertFailsWith(self.run_check(ledger=ledger, git=git), "is not an upstream added line")
 
     def test_port_whose_lines_are_gone_at_head_fails(self):
         git = FakeGit()
@@ -440,6 +508,32 @@ class UpstreamParityTests(unittest.TestCase):
             git.run("commit", "-q", "-am", "after the loop")
             after = git.resolve("HEAD")
             self.assertNotEqual(git.patch_id(inside), git.patch_id(after))
+
+    def test_git_reads_a_revert_of_a_revert_and_an_empty_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            git = parity.Git(root)
+            git.run("init", "-q", "-b", "main")
+            git.run("config", "user.email", "t@example.test")
+            git.run("config", "user.name", "t")
+            (root / "sync.py").write_text("push(u)\n")
+            git.run("add", "sync.py")
+            git.run("commit", "-q", "-m", "base")
+            (root / "sync.py").write_text("push(u)\nhold(u)\n")
+            git.run("commit", "-q", "-am", "port")
+            port = git.resolve("HEAD")
+            git.run("revert", "--no-edit", port)
+            first = git.resolve("HEAD")
+            git.run("revert", "--no-edit", first)
+            second = git.resolve("HEAD")
+            git.run("commit", "-q", "--allow-empty", "-m", f"cite\n\nUpstream: {U_SYNC}")
+            empty = git.resolve("HEAD")
+            reverts = git.reverted(empty)
+            self.assertEqual(reverts, {first: (port,), second: (first,)})
+            self.assertIsNone(parity.live_revert(port, reverts, set()))
+            self.assertEqual(parity.live_revert(first, reverts, set()), second)
+            self.assertEqual(git.diff_lines(empty), [])
+            self.assertEqual(git.added_lines(empty), {})
 
     def test_repository_ledger_is_well_formed(self):
         with open(parity.LEDGER, "rb") as handle:

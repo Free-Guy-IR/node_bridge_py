@@ -64,7 +64,7 @@ fork = [
     "76f747b0e1b7b3bc3c313a131bf36d6da5246bca",
 ]
 match = "adapted"
-reason = "split into three commits for review; their changed lines equal a01bdbb's. 76f747b names a01bdbb in full, since the three cite only the 7-hex prefix and main is not rewritten"
+reason = "split into three commits for review; together their added lines carry every line a01bdbb adds (compared after whitespace normalisation, not by file or position). 76f747b is an empty commit that only names a01bdbb in full, since the three cite only the 7-hex prefix and main is not rewritten; it carries no lines"
 diverged = [
     "5bba04822561e4761d3de9401f5452e6f9a51e48",
     "d886f425225bfc036761ca665b02cc6cb578d8d4",
