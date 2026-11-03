@@ -106,13 +106,38 @@ def decode_chunks(body):
     return chunks
 
 
+class ClosedOnceSession(LazyClientSession):
+    def __init__(self, late_sends, **kwargs):
+        super().__init__(**kwargs)
+        self.late_sends = late_sends
+        self.retired = False
+
+    async def _get_session(self):
+        if self.retired:
+            task = asyncio.current_task()
+            self.late_sends.append(task.get_coro().__qualname__ if task is not None else None)
+        return await super()._get_session()
+
+    async def retire(self):
+        self.retired = True
+        await self.close()
+
+    def is_open(self):
+        return self._session is not None and not self._session.closed
+
+
 class SyncFakeTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.cleanups = []
+        self.late_sends = []
+        self.rest_clients = []
 
     async def asyncTearDown(self):
         for cleanup in reversed(self.cleanups):
             await cleanup()
+        await asyncio.sleep(0)
+        self.assertEqual(self.late_sends, [], "a REST send started after disconnect() closed the client")
+        self.assertEqual([client for client in self.rest_clients if client.is_open()], [])
 
     def make_node(self, node_class, port, **kwargs):
         options = {"sync_poll_interval": POLL_INTERVAL, "sync_chunk_size": 100}
@@ -166,16 +191,18 @@ class SyncFakeTestCase(unittest.IsolatedAsyncioTestCase):
         port = site._server.sockets[0].getsockname()[1]
         node = self.make_node(RestNode, port, **kwargs)
         await node._client.close()
-        node._client = LazyClientSession(
+        node._client = ClosedOnceSession(
+            self.late_sends,
             ssl_context=None,
             headers={"Content-Type": "application/x-protobuf"},
             base_url=f"http://127.0.0.1:{port}/",
             timeout=make_timeout(None),
         )
+        self.rest_clients.append(node._client)
 
         async def cleanup():
             await node.disconnect()
-            await node._client.close()
+            await node._client.retire()
             await node._json_client.close()
             await runner.cleanup()
 

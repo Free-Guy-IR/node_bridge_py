@@ -222,7 +222,7 @@ class RoundBudgetTests(SyncFakeTestCase):
                 pushed = {}
                 deliver = node._deliver_claimed_users
 
-                async def pushing(claimed):
+                async def pushing(claimed, node=node, deliver=deliver, latest=latest, pushed=pushed):
                     if len(pushed) < 12:
                         email = f"f-{len(pushed)}"
                         latest[email] = [f"{email}-v1"]
