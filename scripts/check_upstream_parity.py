@@ -151,14 +151,17 @@ class Git:
         return [line for line in diff.splitlines() if line[:1] in "+-" and not line.startswith(("+++ ", "--- "))]
 
     def reverted(self, head: str) -> dict[str, tuple[str, ...]]:
-        output = self.run("log", "--format=%H%x00%B%x1e", head, "--").stdout
+        output = self.run("log", "-z", "--format=%H%n%B", head, "--").stdout
         reverts: dict[str, tuple[str, ...]] = {}
-        for record in output.split("\x1e"):
-            sha, _, body = record.strip().partition("\x00")
+        for record in output.split("\x00"):
+            sha, _, body = record.strip("\n").partition("\n")
             targets = tuple(REVERT.findall(body))
             if sha and targets:
                 reverts[sha] = targets
         return reverts
+
+    def is_empty(self, sha: str) -> bool:
+        return not self.run("show", "--format=", "--no-renames", "--name-only", sha).stdout.strip()
 
     def added_lines(self, sha: str) -> dict[str, list[str]]:
         diff = self.run("show", "--format=", "--no-color", "--no-ext-diff", "--no-renames", "--unified=0", sha).stdout
@@ -357,7 +360,7 @@ def normalise(line: str) -> str:
 
 
 def check_adapted_lines(entry: dict, label: str, fork: list[str], git: Git, report: Report) -> None:
-    carriers = [sha for sha in fork if git.diff_lines(sha)]
+    carriers = [sha for sha in fork if not git.is_empty(sha)]
     if not carriers:
         report.fail(f"{label}: every fork commit is empty, so none carries upstream {entry['upstream'][:10]}'s lines")
         return

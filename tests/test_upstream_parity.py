@@ -61,6 +61,9 @@ class FakeGit:
     def reverted(self, head):
         return dict(self.reverts)
 
+    def is_empty(self, sha):
+        return not self.diff_lines(sha)
+
     def added_lines(self, sha):
         return self.added.get(sha, {})
 
@@ -526,14 +529,26 @@ class UpstreamParityTests(unittest.TestCase):
             first = git.resolve("HEAD")
             git.run("revert", "--no-edit", first)
             second = git.resolve("HEAD")
+            git.run("revert", "--no-edit", second)
+            git.run("commit", "-q", "--amend", "-m", f"Revert\x1e reapply\n\nThis reverts commit {second}.")
+            third = git.resolve("HEAD")
             git.run("commit", "-q", "--allow-empty", "-m", f"cite\n\nUpstream: {U_SYNC}")
             empty = git.resolve("HEAD")
+            git.run("mv", "sync.py", "store.py")
+            git.run("commit", "-q", "-m", "rename")
+            moved = git.resolve("HEAD")
             reverts = git.reverted(empty)
-            self.assertEqual(reverts, {first: (port,), second: (first,)})
+            self.assertEqual(reverts, {first: (port,), second: (first,), third: (second,)})
+            self.assertEqual(parity.live_revert(port, reverts, set()), first)
+            del reverts[third]
             self.assertIsNone(parity.live_revert(port, reverts, set()))
             self.assertEqual(parity.live_revert(first, reverts, set()), second)
             self.assertEqual(git.diff_lines(empty), [])
             self.assertEqual(git.added_lines(empty), {})
+            self.assertTrue(git.is_empty(empty))
+            self.assertEqual(git.diff_lines(moved), [])
+            self.assertFalse(git.is_empty(moved))
+            self.assertEqual(git.added_lines(moved), {"store.py": ["push(u)"]})
 
     def test_repository_ledger_is_well_formed(self):
         with open(parity.LEDGER, "rb") as handle:
