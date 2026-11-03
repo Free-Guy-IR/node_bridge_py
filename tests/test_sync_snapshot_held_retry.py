@@ -567,6 +567,58 @@ class LeaseModeRaceTests(unittest.IsolatedAsyncioTestCase):
         await other.sync_users_from_source(load)
         self.assertLessEqual(time.monotonic() - started, 6.5)
 
+    async def test_a_fence_returns_kept_claims_a_batch_per_store_call_within_the_internal_timeout(self):
+        calls = []
+
+        class PerClaimCostStore(LeaseOnlyStore):
+            async def requeue_users(self, node_id, claimed_users):
+                calls.append(len(claimed_users))
+                await asyncio.sleep(0.1 * len(claimed_users))
+                await super().requeue_users(node_id, claimed_users)
+
+        store = PerClaimCostStore()
+        refuse = {f"u{i:02d}" for i in range(12)}
+
+        def worker(name):
+            node = RecordingNode(
+                user_sync_store=store, worker_id=name, sync_lease_seconds=60.0, sync_batch_size=4, internal_timeout=1
+            )
+            node._sync_poll_interval = 0.2
+            node._sync_retry_delays = (30.0, 60.0, 300.0)
+            self.nodes.append(node)
+
+            async def send(users, **kwargs):
+                if any(user.email in refuse for user in users):
+                    return FailedUsers(users, rejected=True, detail="proxy is not a UserManager")
+                return []
+
+            async def snapshot(users, **kwargs):
+                return Empty()
+
+            node.sync_users_chunked = send
+            node.sync_users = snapshot
+            return node
+
+        keeper = worker("A")
+        await keeper.update_users([User(email=email, inbounds=["v1"]) for email in sorted(refuse)])
+        await keeper.connect("0.2.0", "1.0.0")
+        await eventually(
+            lambda: len([e for e in keeper._sync_retries.values() if e.queued_at is None and e.attempts]) == 12,
+            timeout=10,
+        )
+        failures = keeper._user_sync_failure_count
+        other = worker("B")
+        refuse.clear()
+
+        async def load():
+            return [User(email=f"u{i:02d}", inbounds=["v1"]) for i in range(12)]
+
+        async with asyncio.timeout(10):
+            await other.sync_users_from_source(load)
+        self.assertEqual(sum(calls), 12)
+        self.assertLessEqual(max(calls), 4)
+        self.assertEqual(keeper._user_sync_failure_count, failures)
+
 
 def slow_enqueue_reply(base):
     class SlowEnqueueReplyStore(base):
