@@ -69,7 +69,7 @@ def create_proxy(
         ),
         tuic=Tuic(uuid=tuic_uuid, password=tuic_password),
         l2tp=L2tpUser(username=l2tp_username, password=l2tp_password),
-        masque=Masque(**{"pass": masque_pass}),
+        masque=Masque(**{"pass": masque_pass}) if masque_pass else None,
     )
 
 
