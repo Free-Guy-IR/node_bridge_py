@@ -11,9 +11,16 @@ class MasqueProxyTest(unittest.TestCase):
         self.assertTrue(proxy.HasField("masque"))
         self.assertEqual(getattr(proxy.masque, "pass"), "s3cret")
 
-    def test_create_proxy_without_masque_pass_sends_an_empty_pass(self):
-        proxy = create_proxy(vless_id="11111111-1111-1111-1111-111111111111")
-        self.assertEqual(getattr(proxy.masque, "pass"), "")
+    def test_create_proxy_without_masque_pass_carries_no_masque_field(self):
+        for masque_pass in (None, ""):
+            proxy = create_proxy(vless_id="11111111-1111-1111-1111-111111111111", masque_pass=masque_pass)
+            self.assertFalse(proxy.HasField("masque"))
+            self.assertNotIn(bytes([0x62, 0x00]), proxy.SerializeToString())
+
+    def test_a_removal_payload_carries_no_masque_bytes(self):
+        removal = create_user("gone@example", create_proxy(), [])
+        self.assertFalse(removal.proxies.HasField("masque"))
+        self.assertNotIn(bytes([0x62, 0x00]), removal.SerializeToString())
 
     def test_masque_rides_proxy_field_12_like_the_fork_node(self):
         field = Proxy.DESCRIPTOR.fields_by_name["masque"]
