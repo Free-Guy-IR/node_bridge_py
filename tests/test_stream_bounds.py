@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from PasarGuardNodeBridge.common import service_pb2 as service
+from PasarGuardNodeBridge.controller import FailedUsers
 from PasarGuardNodeBridge.grpclib import Node as GrpcNode
 from PasarGuardNodeBridge.storage import InMemoryUserSyncStore
 
@@ -63,17 +64,22 @@ class StreamBoundTests(unittest.IsolatedAsyncioTestCase):
         failed = await asyncio.wait_for(call(users), timeout=5)
         self.assertLess(time.monotonic() - started, 2)
         self.assertEqual([user.email for user in failed], [user.email for user in users])
+        return failed
 
     async def test_a_chunked_stream_whose_end_hangs_returns_its_users_as_failed(self):
         node = self.make_node("end")
         users = [service.User(email=str(index)) for index in range(3)]
-        await self.assert_bounded(lambda batch: node.sync_users_chunked(batch, chunk_size=2), users)
+        failed = await self.assert_bounded(lambda batch: node.sync_users_chunked(batch, chunk_size=2), users)
+        self.assertIsInstance(failed, FailedUsers)
+        self.assertFalse(failed.rejected)
         self.assertFalse(node._node_lock.locked())
 
     async def test_a_chunked_stream_whose_open_hangs_returns_its_users_as_failed(self):
         node = self.make_node("open")
         users = [service.User(email="a")]
-        await self.assert_bounded(lambda batch: node.sync_users_chunked(batch, chunk_size=2), users)
+        failed = await self.assert_bounded(lambda batch: node.sync_users_chunked(batch, chunk_size=2), users)
+        self.assertIsInstance(failed, FailedUsers)
+        self.assertFalse(failed.rejected)
         self.assertFalse(node._node_lock.locked())
 
     async def test_a_per_user_stream_whose_end_hangs_returns_its_users_as_failed(self):
