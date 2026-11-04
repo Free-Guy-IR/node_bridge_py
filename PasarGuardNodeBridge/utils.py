@@ -7,6 +7,7 @@ from PasarGuardNodeBridge.common.service_pb2 import (
     L2tpUser,
     Hysteria,
     Hysteria2,
+    Masque,
     MtprotoUser,
     OpenVpnUser,
     Proxy,
@@ -44,6 +45,7 @@ def create_proxy(
     tuic_password: str | None = None,
     l2tp_username: str | None = None,
     l2tp_password: str | None = None,
+    masque_pass: str | None = None,
 ) -> Proxy:
     if wireguard_peer_ips is None:
         wireguard_peer_ips = []
@@ -67,6 +69,7 @@ def create_proxy(
         ),
         tuic=Tuic(uuid=tuic_uuid, password=tuic_password),
         l2tp=L2tpUser(username=l2tp_username, password=l2tp_password),
+        masque=Masque(**{"pass": masque_pass}),
     )
 
 

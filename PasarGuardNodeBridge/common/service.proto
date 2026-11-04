@@ -151,6 +151,10 @@ message Hysteria2 {
     string password = 1;
 }
 
+message Masque {
+    string pass = 1;
+}
+
 // OpenVPN uses --auth-user-pass-verify / --management-client-auth
 // (no per-user client certificate) - username plus password is the full
 // per-user credential, matching every other password-based protocol here.
@@ -198,6 +202,7 @@ message Proxy {
     MtprotoUser mtproto = 9;
     Tuic tuic = 10;
     L2tpUser l2tp = 11;
+    Masque masque = 12;
 }
 
 message User {

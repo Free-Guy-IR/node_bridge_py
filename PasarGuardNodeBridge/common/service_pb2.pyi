@@ -250,6 +250,11 @@ class Hysteria2(_message.Message):
     password: str
     def __init__(self, password: _Optional[str] = ...) -> None: ...
 
+class Masque(_message.Message):
+    __slots__ = ()
+    PASS_FIELD_NUMBER: _ClassVar[int]
+    def __init__(self, **kwargs) -> None: ...
+
 class OpenVpnUser(_message.Message):
     __slots__ = ("username", "password", "max_concurrent_connections")
     USERNAME_FIELD_NUMBER: _ClassVar[int]
@@ -285,7 +290,7 @@ class L2tpUser(_message.Message):
     def __init__(self, username: _Optional[str] = ..., password: _Optional[str] = ...) -> None: ...
 
 class Proxy(_message.Message):
-    __slots__ = ("vmess", "vless", "trojan", "shadowsocks", "wireguard", "hysteria", "hysteria2", "open_vpn", "mtproto", "tuic", "l2tp")
+    __slots__ = ("vmess", "vless", "trojan", "shadowsocks", "wireguard", "hysteria", "hysteria2", "open_vpn", "mtproto", "tuic", "l2tp", "masque")
     VMESS_FIELD_NUMBER: _ClassVar[int]
     VLESS_FIELD_NUMBER: _ClassVar[int]
     TROJAN_FIELD_NUMBER: _ClassVar[int]
@@ -297,6 +302,7 @@ class Proxy(_message.Message):
     MTPROTO_FIELD_NUMBER: _ClassVar[int]
     TUIC_FIELD_NUMBER: _ClassVar[int]
     L2TP_FIELD_NUMBER: _ClassVar[int]
+    MASQUE_FIELD_NUMBER: _ClassVar[int]
     vmess: Vmess
     vless: Vless
     trojan: Trojan
@@ -308,7 +314,8 @@ class Proxy(_message.Message):
     mtproto: MtprotoUser
     tuic: Tuic
     l2tp: L2tpUser
-    def __init__(self, vmess: _Optional[_Union[Vmess, _Mapping]] = ..., vless: _Optional[_Union[Vless, _Mapping]] = ..., trojan: _Optional[_Union[Trojan, _Mapping]] = ..., shadowsocks: _Optional[_Union[Shadowsocks, _Mapping]] = ..., wireguard: _Optional[_Union[Wireguard, _Mapping]] = ..., hysteria: _Optional[_Union[Hysteria, _Mapping]] = ..., hysteria2: _Optional[_Union[Hysteria2, _Mapping]] = ..., open_vpn: _Optional[_Union[OpenVpnUser, _Mapping]] = ..., mtproto: _Optional[_Union[MtprotoUser, _Mapping]] = ..., tuic: _Optional[_Union[Tuic, _Mapping]] = ..., l2tp: _Optional[_Union[L2tpUser, _Mapping]] = ...) -> None: ...
+    masque: Masque
+    def __init__(self, vmess: _Optional[_Union[Vmess, _Mapping]] = ..., vless: _Optional[_Union[Vless, _Mapping]] = ..., trojan: _Optional[_Union[Trojan, _Mapping]] = ..., shadowsocks: _Optional[_Union[Shadowsocks, _Mapping]] = ..., wireguard: _Optional[_Union[Wireguard, _Mapping]] = ..., hysteria: _Optional[_Union[Hysteria, _Mapping]] = ..., hysteria2: _Optional[_Union[Hysteria2, _Mapping]] = ..., open_vpn: _Optional[_Union[OpenVpnUser, _Mapping]] = ..., mtproto: _Optional[_Union[MtprotoUser, _Mapping]] = ..., tuic: _Optional[_Union[Tuic, _Mapping]] = ..., l2tp: _Optional[_Union[L2tpUser, _Mapping]] = ..., masque: _Optional[_Union[Masque, _Mapping]] = ...) -> None: ...
 
 class User(_message.Message):
     __slots__ = ("email", "proxies", "inbounds")
