@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from PasarGuardNodeBridge.common import service_pb2 as service
 from PasarGuardNodeBridge.grpclib import Node as GrpcNode
+from PasarGuardNodeBridge.controller import FailedUsers
 from tests.sync_fakes import FakeNodeCore, SyncFakeTestCase, user
 
 
@@ -112,8 +113,8 @@ class QuietStartedNodeTests(SyncFakeTestCase):
                     core.on_send = on_send
                     original_count = node._count_systemic_rejection
 
-                    def counting(emails):
-                        original_count(emails)
+                    def counting(*args):
+                        original_count(*args)
                         first_answer.set()
 
                     node._count_systemic_rejection = counting
@@ -132,7 +133,7 @@ class QuietStartedNodeTests(SyncFakeTestCase):
         for make in (self.grpc_node, self.rest_node):
             with self.subTest(transport=make.__name__):
                 core = FakeNodeCore(delay=0.01)
-                core.reject_all = True
+                core.invalid_all = True
                 node = await make(core, sync_lease_seconds=1.0)
                 node._hard_reset_threshold = threshold
                 raised = self.watch_hard_reset(node)
@@ -145,7 +146,13 @@ class QuietStartedNodeTests(SyncFakeTestCase):
 
                 await self.until(fired, 10)
                 self.assertEqual(len(raised), 1, raised)
-                self.assertTrue(any("since it connected" in line for line in lines), lines)
+                self.assertTrue(
+                    any(
+                        "; no start, full sync or update has delivered a user to it since it connected" in line
+                        for line in lines
+                    ),
+                    lines,
+                )
 
 
     async def test_a_delta_round_from_before_a_reconnect_does_not_mark_the_new_connection_as_accepting(self):
@@ -179,3 +186,116 @@ class QuietStartedNodeTests(SyncFakeTestCase):
                 await asyncio.sleep(1.5)
                 self.assertEqual(delivered, [1])
                 self.assertFalse(node._sync_node_accepted)
+
+    def reconnect_inside(self, node, name, needs_items):
+        original = getattr(node, name)
+        reconnected = []
+
+        async def reconnecting(items):
+            if (items or not needs_items) and not reconnected:
+                reconnected.append(node._sync_connection_epoch)
+                await node.connect("0.2.0", "1.0.0")
+            return await original(items)
+
+        setattr(node, name, reconnecting)
+        return reconnected
+
+    async def test_a_round_from_before_a_reconnect_does_not_count_its_rejections_for_the_new_connection(self):
+        for make in (self.grpc_node, self.rest_node):
+            with self.subTest(transport=make.__name__):
+                core = FakeNodeCore(delay=0.01)
+                node = await make(core, sync_lease_seconds=1.0)
+                node._hard_reset_threshold = 1
+                raised = self.watch_hard_reset(node)
+                reconnected = self.reconnect_inside(node, "_ack_claimed_users", needs_items=False)
+                await node.connect("0.2.0", "1.0.0")
+                await node.update_user(service.User(email="bad-0", inbounds=["bad"]))
+
+                async def done():
+                    return bool(reconnected)
+
+                await self.until(done, 10)
+                await asyncio.sleep(1.0)
+                self.assertEqual(reconnected, [1])
+                self.assertGreater(core.sends_with("bad-0"), 0)
+                self.assertIsNone(node._sync_rejecting_since)
+                self.assertEqual(raised, [])
+
+    async def test_a_transport_failure_from_before_a_reconnect_does_not_count_for_the_new_connection(self):
+        for make in (self.grpc_node, self.rest_node):
+            with self.subTest(transport=make.__name__):
+                core = FakeNodeCore(delay=0.01)
+                node = await make(core, sync_lease_seconds=1.0)
+                node._hard_reset_threshold = 1
+                raised = self.watch_hard_reset(node)
+                sends = []
+
+                async def failing(users, **kwargs):
+                    sends.append(len(users))
+                    return FailedUsers(users, rejected=False, detail="stream reset")
+
+                node.sync_users_chunked = failing
+                reconnected = self.reconnect_inside(node, "_requeue_claimed_users", needs_items=True)
+                await node.connect("0.2.0", "1.0.0")
+                await node.update_user(user("fresh-0"))
+
+                async def done():
+                    return bool(reconnected)
+
+                await self.until(done, 10)
+                await asyncio.sleep(0.2)
+                self.assertEqual(reconnected, [1])
+                self.assertEqual(node._user_sync_failure_count, 0)
+                self.assertEqual(raised, [])
+
+    async def test_a_success_from_before_a_reconnect_does_not_clear_the_new_connection_state(self):
+        for make in (self.grpc_node, self.rest_node):
+            with self.subTest(transport=make.__name__):
+                core = FakeNodeCore(delay=0.01)
+                node = await make(core, sync_lease_seconds=1.0)
+                await node.connect("0.2.0", "1.0.0")
+                stale = node._sync_connection_epoch
+                await node.connect("0.2.0", "1.0.0")
+                node._user_sync_failure_count = 1
+                node._sync_rejecting_since = 5.0
+                node._hard_reset_event.set()
+                await node._reset_user_sync_failure_count(stale)
+                await node._reset_transport_failure_count(stale)
+                await node._increment_user_sync_failure(stale)
+                self.assertEqual(node._user_sync_failure_count, 1)
+                self.assertEqual(node._sync_rejecting_since, 5.0)
+                self.assertTrue(node.requires_hard_reset())
+
+    async def test_a_core_that_dies_after_a_good_start_is_hard_reset_once(self):
+        threshold = 2
+        for make in (self.grpc_node, self.rest_node):
+            with self.subTest(transport=make.__name__):
+                core = FakeNodeCore(delay=0.05)
+                node = await make(core, sync_lease_seconds=1.0)
+                node._hard_reset_threshold = threshold
+                raised = self.watch_hard_reset(node)
+                await self.started(node, core, [user(f"good-{index}") for index in range(3)])
+                core.reject_all = True
+                for index in range(8):
+                    await node.update_user(user(f"fresh-{index}"))
+                    await asyncio.sleep(0.3)
+                await asyncio.sleep(backoff_before_threshold(threshold) + 4)
+                self.assertEqual(len(raised), 1, raised)
+
+    async def test_invalid_users_on_a_live_core_after_a_good_start_never_hard_reset(self):
+        threshold = 2
+        for make in (self.grpc_node, self.rest_node):
+            with self.subTest(transport=make.__name__):
+                core = FakeNodeCore(delay=0.05)
+                node = await make(core, sync_lease_seconds=1.0)
+                node._hard_reset_threshold = threshold
+                raised = self.watch_hard_reset(node)
+                await self.started(node, core, [user(f"good-{index}") for index in range(3)])
+                core.invalid_all = True
+                for index in range(8):
+                    await node.update_user(user(f"fresh-{index}"))
+                    await asyncio.sleep(0.3)
+                await asyncio.sleep(backoff_before_threshold(threshold) + 4)
+                self.assertGreater(core.sends_with("fresh-7"), 0)
+                self.assertEqual(node._user_sync_failure_count, 0)
+                self.assertEqual(raised, [])

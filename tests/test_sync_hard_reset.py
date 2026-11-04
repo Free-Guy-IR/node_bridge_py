@@ -1,6 +1,7 @@
 import asyncio
 
 from PasarGuardNodeBridge.common import service_pb2 as service
+from PasarGuardNodeBridge.controller import FailedUsers
 from tests.sync_fakes import FakeNodeCore, SyncFakeTestCase, user
 
 
@@ -46,7 +47,7 @@ class SystemicRejectionTests(SyncFakeTestCase):
         for make in (self.grpc_node, self.rest_node):
             with self.subTest(transport=make.__name__):
                 core = FakeNodeCore(delay=0.25)
-                core.reject_all = True
+                core.invalid_all = True
                 node = await make(core, sync_lease_seconds=lease)
                 node._hard_reset_threshold = threshold
                 raised = self.watch_hard_reset(node)
@@ -97,7 +98,7 @@ class SystemicRejectionTests(SyncFakeTestCase):
         for make in (self.grpc_node, self.rest_node):
             with self.subTest(transport=make.__name__):
                 core = FakeNodeCore(delay=0.05)
-                core.reject_all = True
+                core.invalid_all = True
                 node = await make(core, sync_lease_seconds=lease)
                 node._hard_reset_threshold = threshold
                 raised = self.watch_hard_reset(node)
@@ -106,7 +107,7 @@ class SystemicRejectionTests(SyncFakeTestCase):
                 await self.start(node, initial)
                 stop = self.arrivals(node, "fresh", 0.15, latest)
                 await asyncio.sleep(backoff_before_threshold(threshold) / 2)
-                core.reject_all = False
+                core.invalid_all = False
                 await asyncio.sleep(2 * backoff_before_threshold(threshold))
                 await stop()
                 await self.until(lambda: self.settled(node, core, latest, []), 20)
@@ -117,7 +118,7 @@ class SystemicRejectionTests(SyncFakeTestCase):
         for make in (self.grpc_node, self.rest_node):
             with self.subTest(transport=make.__name__):
                 core = FakeNodeCore(delay=0.05)
-                core.reject_all = True
+                core.invalid_all = True
                 node = await make(core, sync_lease_seconds=lease)
                 node._hard_reset_threshold = threshold
                 raised = self.watch_hard_reset(node)
@@ -142,7 +143,7 @@ class SystemicRejectionTests(SyncFakeTestCase):
                 for email, inbounds in latest.items():
                     written.setdefault(email, [inbounds])
                 recovered = loop.time()
-                core.reject_all = False
+                core.invalid_all = False
                 await self.until(lambda: self.settled(node, core, latest, []), 90)
                 self.assertFalse(node.requires_hard_reset())
                 self.assertEqual([at for at in raised if at >= recovered], [])
@@ -157,7 +158,7 @@ class SystemicRejectionTests(SyncFakeTestCase):
             for make in (self.grpc_node, self.rest_node):
                 with self.subTest(lease=lease, transport=make.__name__):
                     core = FakeNodeCore(delay=0.01)
-                    core.reject_all = True
+                    core.invalid_all = True
                     node = await make(core, sync_lease_seconds=lease)
                     raised = self.watch_hard_reset(node)
                     started = await self.start(node, [user(f"u-{index}") for index in range(30)])
@@ -186,7 +187,7 @@ class SystemicRejectionTests(SyncFakeTestCase):
         for make in (self.grpc_node, self.rest_node):
             with self.subTest(transport=make.__name__):
                 core = FakeNodeCore(delay=0.05)
-                core.reject_all = True
+                core.invalid_all = True
                 node = await make(core, sync_lease_seconds=lease)
                 node._hard_reset_threshold = threshold
                 raised = self.watch_hard_reset(node)
@@ -201,3 +202,30 @@ class SystemicRejectionTests(SyncFakeTestCase):
                 await stop()
                 self.assertEqual(len(raised), 2, raised)
                 self.assertGreaterEqual(raised[1] - reconnected, backoff_before_threshold(threshold))
+
+    async def test_a_round_the_node_answers_clears_the_transport_failure_streak(self):
+        for make in (self.grpc_node, self.rest_node):
+            with self.subTest(transport=make.__name__):
+                core = FakeNodeCore(delay=0.01)
+                node = await make(core, sync_lease_seconds=1.0)
+                node._hard_reset_threshold = 5
+                rounds = []
+                streaks = []
+
+                async def send(users, **kwargs):
+                    rounds.append(len(users))
+                    streaks.append(node._user_sync_failure_count)
+                    if len(rounds) <= 2:
+                        return FailedUsers(users, rejected=False, detail="stream reset")
+                    return FailedUsers(users, rejected=True, detail="failed to update users: invalid account seed-0")
+
+                node.sync_users_chunked = send
+                await node.update_users([service.User(email="seed-0", inbounds=["vless"])])
+                await node.connect("0.2.0", "1.0.0")
+
+                async def answered():
+                    return len(rounds) >= 3 and node._user_sync_failure_count == 0
+
+                await self.until(answered, 10)
+                self.assertEqual(streaks[:3], [0, 1, 2])
+                self.assertFalse(node.requires_hard_reset())

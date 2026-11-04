@@ -14,7 +14,7 @@ from python_socks.async_.asyncio import Proxy
 from PasarGuardNodeBridge.abstract_node import PasarGuardNode
 from PasarGuardNodeBridge.common import service_grpc
 from PasarGuardNodeBridge.common import service_pb2 as service
-from PasarGuardNodeBridge.controller import FailedUsers, Health, NodeAPIError
+from PasarGuardNodeBridge.controller import FailedUsers, Health, NodeAPIError, core_unreachable
 from PasarGuardNodeBridge.log_stream import deliver_stream_error
 from PasarGuardNodeBridge.storage import LifecycleOperation, LifecycleStatus
 from PasarGuardNodeBridge.utils import format_host_for_url, grpc_to_http_status
@@ -477,6 +477,7 @@ class Node(PasarGuardNode):
                     isinstance(e, GRPCError)
                     and e.status is Status.INTERNAL
                     and (e.message or "").startswith(("failed to update users", "user sync failed"))
+                    and not core_unreachable(e.message or "")
                 )
                 return FailedUsers(users, rejected=rejected, detail=e.message if rejected else str(e))
 

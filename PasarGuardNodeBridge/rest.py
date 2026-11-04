@@ -10,7 +10,7 @@ from google.protobuf.message import DecodeError, Message
 from PasarGuardNodeBridge.abstract_node import PasarGuardNode
 from PasarGuardNodeBridge.aiohttp_compat import BufferedStatusError, LazyClientSession, buffer_response, make_timeout
 from PasarGuardNodeBridge.common import service_pb2 as service
-from PasarGuardNodeBridge.controller import FailedUsers, Health, NodeAPIError
+from PasarGuardNodeBridge.controller import FailedUsers, Health, NodeAPIError, core_unreachable
 from PasarGuardNodeBridge.log_stream import deliver_stream_error
 from PasarGuardNodeBridge.storage import LifecycleOperation, LifecycleStatus
 from PasarGuardNodeBridge.utils import format_host_for_url
@@ -394,6 +394,7 @@ class Node(PasarGuardNode):
                     isinstance(e, BufferedStatusError)
                     and e.response.status_code == 500
                     and detail not in ("backend not initialized", "backend is not started")
+                    and not core_unreachable(detail)
                 )
                 return FailedUsers(users, rejected=rejected, detail=detail if rejected else str(e))
 

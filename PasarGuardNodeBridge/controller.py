@@ -79,6 +79,14 @@ class FailedUsers(list):
         self.detail = detail
 
 
+_CORE_UNREACHABLE = ("code = Unavailable", "connection refused")
+
+
+def core_unreachable(detail: str) -> bool:
+    errors = [line.strip() for line in detail.replace("failed to update users:", "\n").splitlines() if line.strip()]
+    return bool(errors) and all(any(signal in error for signal in _CORE_UNREACHABLE) for error in errors)
+
+
 class _Delivery(list):
     """Users to put back in the queue after a delivery (transport failures).
 
@@ -89,7 +97,15 @@ class _Delivery(list):
     """
 
     def __init__(
-        self, failed=(), isolated=(), deferred=(), deferred_alone=False, groups=None, accepted=0, systemic=()
+        self,
+        failed=(),
+        isolated=(),
+        deferred=(),
+        deferred_alone=False,
+        groups=None,
+        accepted=0,
+        systemic=(),
+        epoch=None,
     ):
         super().__init__(failed)
         self.isolated = list(isolated)
@@ -98,6 +114,7 @@ class _Delivery(list):
         self.groups = dict(groups or {})
         self.accepted = accepted
         self.systemic = list(systemic)
+        self.epoch = epoch
 
 
 class _FencedRequeueError(Exception):
@@ -319,9 +336,14 @@ class Controller:
         """
         return self._hard_reset_event.is_set()
 
-    async def _increment_user_sync_failure(self):
+    def _stale(self, epoch: int | None) -> bool:
+        return epoch is not None and epoch != self._sync_connection_epoch
+
+    async def _increment_user_sync_failure(self, epoch: int | None = None):
         """Increment user sync failure counter and check if hard reset is needed."""
         async with self._failure_count_lock:
+            if self._stale(epoch):
+                return
             self._user_sync_failure_count += 1
             if self._user_sync_failure_count >= self._hard_reset_threshold and not self._hard_reset_event.is_set():
                 self._hard_reset_event.set()
@@ -329,9 +351,16 @@ class Controller:
                     f"[{self.name}] HARD RESET REQUIRED: User sync failed {self._user_sync_failure_count} times in a row"
                 )
 
-    async def _reset_user_sync_failure_count(self):
+    async def _reset_transport_failure_count(self, epoch: int | None = None):
+        async with self._failure_count_lock:
+            if not self._stale(epoch):
+                self._user_sync_failure_count = 0
+
+    async def _reset_user_sync_failure_count(self, epoch: int | None = None):
         """Reset user sync failure counter on successful sync and clear hard reset event."""
         async with self._failure_count_lock:
+            if self._stale(epoch):
+                return
             old_count = self._user_sync_failure_count
             self._user_sync_failure_count = 0
             self._sync_rejecting_since = None
@@ -343,8 +372,8 @@ class Controller:
                         f"[{self.name}] User sync recovered after {old_count} failures, cleared hard reset event"
                     )
 
-    def _count_systemic_rejection(self, emails: list[str]) -> None:
-        if self._sync_node_accepted:
+    def _count_systemic_rejection(self, emails: list[str], epoch: int | None = None) -> None:
+        if self._sync_node_accepted or self._stale(epoch):
             return
         if self._sync_rejecting_since is None:
             self._sync_rejecting_since = asyncio.get_running_loop().time()
@@ -372,7 +401,8 @@ class Controller:
             self._hard_reset_event.set()
             self.logger.critical(
                 f"[{self.name}] HARD RESET REQUIRED: node rejected {len(self._sync_rejected_users)} or more new "
-                f"users in {now - self._sync_rejecting_since:.0f} s and has accepted no user since it connected"
+                f"users in {now - self._sync_rejecting_since:.0f} s; no start, full sync or update has delivered a user "
+                f"to it since it connected"
             )
 
     async def update_user(self, user: User):
@@ -610,8 +640,8 @@ class Controller:
         self._shutdown_event.clear()
 
         # Reset hard reset event and failure counters
-        self._hard_reset_event.clear()
         async with self._failure_count_lock:
+            self._hard_reset_event.clear()
             self._user_sync_failure_count = 0
             self._sync_rejecting_since = None
             self._sync_node_accepted = False
@@ -918,7 +948,7 @@ class Controller:
         systemic = (
             [] if self._sync_node_accepted or stale else [user.email for user, _ in isolated if user.email not in known]
         )
-        return _Delivery(retry, isolated, deferred, deferred_alone, groups, accepted, systemic)
+        return _Delivery(retry, isolated, deferred, deferred_alone, groups, accepted, systemic, epoch)
 
     def _send_alone(self, user: User) -> bool:
         entry = self._sync_retries.get(user.email)
@@ -1108,6 +1138,7 @@ class Controller:
                     if not self._work_available.is_set() and self._next_wake_at() == math.inf:
                         return
                 self._raise_systemic_hard_reset_if_due()
+                round_epoch = self._sync_connection_epoch
                 try:
                     health = await self.get_health()
                     if health in (Health.NOT_CONNECTED, Health.INVALID):
@@ -1172,15 +1203,20 @@ class Controller:
                             [item for item in claimed if item.user.email in failed_emails]
                         )
                     claimed = []
+                    epoch = getattr(failed, "epoch", None)
+                    epoch = round_epoch if epoch is None else epoch
                     if failed:
-                        await self._increment_user_sync_failure()
+                        await self._increment_user_sync_failure(epoch)
                         await asyncio.sleep(retry_delay)
                         retry_delay = min(retry_delay * 2, 30.0)
                     elif getattr(failed, "accepted", True):
-                        await self._reset_user_sync_failure_count()
+                        await self._reset_user_sync_failure_count(epoch)
                         retry_delay = 1.0
-                    elif failed.systemic:
-                        self._count_systemic_rejection(failed.systemic)
+                    else:
+                        await self._reset_transport_failure_count(epoch)
+                        retry_delay = 1.0
+                        if failed.systemic:
+                            self._count_systemic_rejection(failed.systemic, epoch)
                 except Exception as exc:
                     self.logger.warning(f"[{self.name}] User sync failed; retrying: {type(exc).__name__}: {exc!s}")
                     self._work_available.set()
@@ -1190,7 +1226,7 @@ class Controller:
                             await self._requeue_claimed_users(claimed)
                     claimed = []
                     if not isinstance(exc, _FencedRequeueError):
-                        await self._increment_user_sync_failure()
+                        await self._increment_user_sync_failure(round_epoch)
                     await asyncio.sleep(retry_delay)
                     retry_delay = min(retry_delay * 2, 30.0)
         finally:

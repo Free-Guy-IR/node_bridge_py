@@ -28,6 +28,12 @@ def user(email, inbound="good"):
     return service.User(email=email, inbounds=[inbound])
 
 
+DEAD_CORE_ERROR = (
+    "failed to update users:\nrpc error: code = Unavailable desc = connection error: desc = "
+    '"transport: Error while dialing: dial tcp 127.0.0.1:8080: connect: connection refused"'
+)
+
+
 def is_bad(item):
     return "bad" in item.inbounds
 
@@ -42,6 +48,7 @@ class FakeNodeCore:
         self.batches = []
         self.on_send = None
         self.reject_all = False
+        self.invalid_all = False
 
     def accept(self, item):
         self.applied[item.email] = list(item.inbounds)
@@ -56,7 +63,9 @@ class FakeNodeCore:
         if delay:
             await asyncio.sleep(delay)
         if self.reject_all:
-            return Status.INTERNAL, "failed to update users: core api unreachable"
+            return Status.INTERNAL, "failed to update users: " + DEAD_CORE_ERROR
+        if self.invalid_all:
+            return Status.INTERNAL, f"failed to update users: failed to update users:\ninvalid account {users[0].email}"
         bad = [item.email for item in users if is_bad(item)]
         if bad:
             return Status.INTERNAL, f"failed to update users: invalid account {bad[0]}"
@@ -211,9 +220,9 @@ class SyncFakeTestCase(unittest.IsolatedAsyncioTestCase):
         counted = []
         increment = node._increment_user_sync_failure
 
-        async def counting_increment():
+        async def counting_increment(*args):
             counted.append(node._user_sync_failure_count + 1)
-            await increment()
+            await increment(*args)
 
         node._increment_user_sync_failure = counting_increment
         return counted
@@ -222,9 +231,9 @@ class SyncFakeTestCase(unittest.IsolatedAsyncioTestCase):
         resets = []
         reset = node._reset_user_sync_failure_count
 
-        async def recording_reset():
+        async def recording_reset(*args):
             resets.append((asyncio.get_running_loop().time(), node._user_sync_failure_count))
-            await reset()
+            await reset(*args)
 
         node._reset_user_sync_failure_count = recording_reset
         return resets
