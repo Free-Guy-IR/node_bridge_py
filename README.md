@@ -2,6 +2,8 @@
 
 > Note: This is the [Free-Guy-IR](https://github.com/Free-Guy-IR) fork of the original [PasarGuard node_bridge_py](https://github.com/Free-Guy-IR/node_bridge_py), extended with sing-box, OpenVPN, MTProto and L2TP backends, Hysteria2, OpenVPN, MTProto, TUIC and L2TP user credentials, and several backends on one node (`add_backend`, `remove_backend`, `list_backends`).
 
+> Wire compatibility: in this fork `Proxy` field 7 carries Hysteria2 credentials and Masque is field 12, while upstream PasarGuard uses field 7 for Masque. An upstream node (0.5.6 or later) would read a fork user's Hysteria2 password as its Masque password and drop fields 8 to 12, so mixing a fork panel or bridge with an upstream node, or an upstream bridge with a fork node, is unsupported. Use this bridge only with [Free-Guy-IR nodes](https://github.com/Free-Guy-IR/node).
+
 Async Python client for connecting to a [PasarGuard node](https://github.com/PasarGuard/node) over `gRPC` or `REST`.
 
 This package provides:
