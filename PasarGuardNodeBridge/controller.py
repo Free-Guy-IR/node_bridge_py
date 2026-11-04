@@ -1218,8 +1218,9 @@ class Controller:
                         await self._reset_user_sync_failure_count(epoch)
                         retry_delay = 1.0
                     else:
-                        await self._reset_transport_failure_count(epoch)
-                        retry_delay = 1.0
+                        if isolated and not deferred:
+                            await self._reset_transport_failure_count(epoch)
+                            retry_delay = 1.0
                         if failed.systemic:
                             self._count_systemic_rejection(failed.systemic, epoch)
                 except Exception as exc:
