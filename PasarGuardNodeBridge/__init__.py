@@ -12,10 +12,10 @@ Features:
 - Extensible with custom metadata via the `extra` argument
 
 Author: PasarGuard
-Version: 0.9.2+singbox.3
+Version: 0.9.2+singbox.4
 """
 
-__version__ = "0.9.2+singbox.3"
+__version__ = "0.9.2+singbox.4"
 __author__ = "PasarGuard"
 
 
