@@ -1143,6 +1143,7 @@ class Controller:
                         return
                 self._raise_systemic_hard_reset_if_due()
                 round_epoch = self._sync_connection_epoch
+                delivery_epoch = None
                 try:
                     health = await self.get_health()
                     if health in (Health.NOT_CONNECTED, Health.INVALID):
@@ -1171,6 +1172,7 @@ class Controller:
                                 await self._requeue_claimed_users(claimed)
                                 claimed = []
                         failed = await self._deliver_claimed_users(claimed) if claimed else []
+                        delivery_epoch = getattr(failed, "epoch", None)
                     if not claimed:
                         await asyncio.sleep(self._sync_poll_interval)
                         continue
@@ -1207,8 +1209,7 @@ class Controller:
                             [item for item in claimed if item.user.email in failed_emails]
                         )
                     claimed = []
-                    epoch = getattr(failed, "epoch", None)
-                    epoch = round_epoch if epoch is None else epoch
+                    epoch = round_epoch if delivery_epoch is None else delivery_epoch
                     if failed:
                         await self._increment_user_sync_failure(epoch)
                         await asyncio.sleep(retry_delay)
@@ -1230,7 +1231,9 @@ class Controller:
                             await self._requeue_claimed_users(claimed)
                     claimed = []
                     if not isinstance(exc, _FencedRequeueError):
-                        await self._increment_user_sync_failure(round_epoch)
+                        await self._increment_user_sync_failure(
+                            round_epoch if delivery_epoch is None else delivery_epoch
+                        )
                     await asyncio.sleep(retry_delay)
                     retry_delay = min(retry_delay * 2, 30.0)
         finally:

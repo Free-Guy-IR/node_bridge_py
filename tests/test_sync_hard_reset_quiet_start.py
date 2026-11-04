@@ -335,3 +335,48 @@ class QuietStartedNodeTests(SyncFakeTestCase):
                 self.assertGreater(core.sends_with("fresh-7"), 0)
                 self.assertEqual(node._user_sync_failure_count, 0)
                 self.assertEqual(raised, [])
+
+    async def test_an_exception_after_a_mid_round_reconnect_counts_for_the_connection_that_got_the_delivery(self):
+        for make in (self.grpc_node, self.rest_node):
+            with self.subTest(transport=make.__name__):
+                core = FakeNodeCore(delay=0.01)
+                node = await make(core, sync_lease_seconds=1.0)
+                await node.connect("0.2.0", "1.0.0")
+                reconnected = []
+                original_claim = node._claim_pending_users
+
+                async def claiming(*args, **kwargs):
+                    claimed = await original_claim(*args, **kwargs)
+                    if claimed and not reconnected:
+                        reconnected.append(node._sync_connection_epoch)
+                        await node.connect("0.2.0", "1.0.0")
+                    return claimed
+
+                node._claim_pending_users = claiming
+                original_ack = node._ack_claimed_users
+                raised = []
+
+                async def acking(items):
+                    if items and not raised:
+                        raised.append(node._sync_connection_epoch)
+                        raise RuntimeError("store down")
+                    return await original_ack(items)
+
+                node._ack_claimed_users = acking
+                counted = []
+                original_increment = node._increment_user_sync_failure
+
+                async def incrementing(epoch=None):
+                    await original_increment(epoch)
+                    counted.append((epoch, node._user_sync_failure_count))
+
+                node._increment_user_sync_failure = incrementing
+                await node.update_user(user("fresh-0"))
+
+                async def done():
+                    return bool(counted)
+
+                await self.until(done, 10)
+                self.assertEqual(reconnected, [1])
+                self.assertEqual(raised, [2])
+                self.assertEqual(counted[0], (2, 1))
