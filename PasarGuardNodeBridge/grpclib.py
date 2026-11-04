@@ -414,13 +414,14 @@ class Node(PasarGuardNode):
         if flush_pending:
             await self.flush_pending_users()
 
+        epoch = self._sync_connection_epoch
         async with self._node_lock:
             response = await self._handle_grpc_request(
                 method=self._client.SyncUsers,
                 request=service.Users(users=users),
                 timeout=timeout,
             )
-        await self._clear_rejected_users(bool(users))
+        await self._clear_rejected_users(bool(users), epoch)
         return response
 
     async def sync_users_chunked(

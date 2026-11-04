@@ -147,3 +147,35 @@ class QuietStartedNodeTests(SyncFakeTestCase):
                 self.assertEqual(len(raised), 1, raised)
                 self.assertTrue(any("since it connected" in line for line in lines), lines)
 
+
+    async def test_a_delta_round_from_before_a_reconnect_does_not_mark_the_new_connection_as_accepting(self):
+        for make in (self.grpc_node, self.rest_node):
+            with self.subTest(transport=make.__name__):
+                core = FakeNodeCore(delay=0.5)
+                node = await make(core, sync_lease_seconds=2.0)
+                in_flight = asyncio.Event()
+
+                async def on_send(users):
+                    in_flight.set()
+
+                core.on_send = on_send
+                delivered = []
+                original_deliver = node._deliver_claimed_users
+
+                async def delivering(claimed):
+                    result = await original_deliver(claimed)
+                    delivered.append(len(claimed))
+                    return result
+
+                node._deliver_claimed_users = delivering
+                await node.connect("0.2.0", "1.0.0")
+                good = user("good-0")
+                core.accept(good)
+                await node.update_user(good)
+                await asyncio.wait_for(in_flight.wait(), 10)
+                core.on_send = None
+                await node.connect("0.2.0", "1.0.0")
+
+                await asyncio.sleep(1.5)
+                self.assertEqual(delivered, [1])
+                self.assertFalse(node._sync_node_accepted)

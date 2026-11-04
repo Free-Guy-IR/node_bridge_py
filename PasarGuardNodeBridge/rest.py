@@ -313,6 +313,7 @@ class Node(PasarGuardNode):
         if flush_pending:
             await self.flush_pending_users()
 
+        epoch = self._sync_connection_epoch
         async with self._node_lock:
             response = await self._make_request(
                 method="PUT",
@@ -321,7 +322,7 @@ class Node(PasarGuardNode):
                 proto_message=service.Users(users=users),
                 proto_response_class=service.Empty,
             )
-        await self._clear_rejected_users(bool(users))
+        await self._clear_rejected_users(bool(users), epoch)
         return response
 
     async def sync_users_chunked(

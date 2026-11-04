@@ -281,6 +281,7 @@ class Controller:
         self._sync_rejecting_since: float | None = None
         self._sync_rejected_users: set[str] = set()
         self._sync_node_accepted = False
+        self._sync_connection_epoch = 0
 
         # Separate locks for different resources to reduce contention
         self._health_lock = asyncio.Lock()
@@ -614,6 +615,7 @@ class Controller:
             self._user_sync_failure_count = 0
             self._sync_rejecting_since = None
             self._sync_node_accepted = False
+            self._sync_connection_epoch += 1
 
         # Cleanup tasks with task lock
         async with self._task_lock:
@@ -833,6 +835,7 @@ class Controller:
         ``deferred``. A transport or availability failure is not split: the rest of the batch is
         returned to be retried as a whole.
         """
+        epoch = self._sync_connection_epoch
         retry: list[User] = []
         isolated: list[tuple[User, str]] = []
         deferred: list[tuple[User, str]] = []
@@ -910,8 +913,11 @@ class Controller:
                 groups[user.email] = (group, alone)
         if waiting:
             self._sync_fresh_last = not waiting_sent
-        self._sync_node_accepted = self._sync_node_accepted or accepted > 0
-        systemic = [] if self._sync_node_accepted else [user.email for user, _ in isolated if user.email not in known]
+        await self._mark_node_accepted(accepted > 0, epoch)
+        stale = epoch != self._sync_connection_epoch
+        systemic = (
+            [] if self._sync_node_accepted or stale else [user.email for user, _ in isolated if user.email not in known]
+        )
         return _Delivery(retry, isolated, deferred, deferred_alone, groups, accepted, systemic)
 
     def _send_alone(self, user: User) -> bool:
@@ -972,7 +978,14 @@ class Controller:
         entry.rechecks = 0
         entry.next_attempt = now
 
-    async def _clear_rejected_users(self, accepted: bool = False) -> None:
+    async def _mark_node_accepted(self, accepted: bool, epoch: int) -> None:
+        if not accepted:
+            return
+        async with self._failure_count_lock:
+            if epoch == self._sync_connection_epoch:
+                self._sync_node_accepted = True
+
+    async def _clear_rejected_users(self, accepted: bool = False, epoch: int | None = None) -> None:
         """The node was given a full user set: payloads held for retry are older, so forget them."""
         mode = self._retry_mode()
         if mode == "hold":
@@ -981,7 +994,7 @@ class Controller:
             tokens = [entry.token for entry in self._sync_retries.values() if entry.queued_at is None]
         self._sync_retries.clear()
         self._sync_rejecting_since = None
-        self._sync_node_accepted = self._sync_node_accepted or accepted
+        await self._mark_node_accepted(accepted, self._sync_connection_epoch if epoch is None else epoch)
         if mode != "refresh":
             self._sync_unretired += tokens
         if self._sync_unretired:
