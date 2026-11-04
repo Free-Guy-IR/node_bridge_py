@@ -33,6 +33,8 @@ DEAD_CORE_ERROR = (
     '"transport: Error while dialing: dial tcp 127.0.0.1:8080: connect: connection refused"'
 )
 
+HUNG_CORE_ERROR = "failed to update users:\nrpc error: code = DeadlineExceeded desc = context deadline exceeded"
+
 
 def is_bad(item):
     return "bad" in item.inbounds
@@ -48,6 +50,7 @@ class FakeNodeCore:
         self.batches = []
         self.on_send = None
         self.reject_all = False
+        self.dead_error = DEAD_CORE_ERROR
         self.invalid_all = False
 
     def accept(self, item):
@@ -63,7 +66,7 @@ class FakeNodeCore:
         if delay:
             await asyncio.sleep(delay)
         if self.reject_all:
-            return Status.INTERNAL, "failed to update users: " + DEAD_CORE_ERROR
+            return Status.INTERNAL, "failed to update users: " + self.dead_error
         if self.invalid_all:
             return Status.INTERNAL, f"failed to update users: failed to update users:\ninvalid account {users[0].email}"
         bad = [item.email for item in users if is_bad(item)]

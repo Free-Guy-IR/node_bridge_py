@@ -4,7 +4,7 @@ from unittest.mock import patch
 from PasarGuardNodeBridge.common import service_pb2 as service
 from PasarGuardNodeBridge.grpclib import Node as GrpcNode
 from PasarGuardNodeBridge.controller import FailedUsers
-from tests.sync_fakes import FakeNodeCore, SyncFakeTestCase, user
+from tests.sync_fakes import HUNG_CORE_ERROR, FakeNodeCore, SyncFakeTestCase, user
 
 
 def backoff_before_threshold(threshold):
@@ -276,6 +276,23 @@ class QuietStartedNodeTests(SyncFakeTestCase):
                 raised = self.watch_hard_reset(node)
                 await self.started(node, core, [user(f"good-{index}") for index in range(3)])
                 core.reject_all = True
+                for index in range(8):
+                    await node.update_user(user(f"fresh-{index}"))
+                    await asyncio.sleep(0.3)
+                await asyncio.sleep(backoff_before_threshold(threshold) + 4)
+                self.assertEqual(len(raised), 1, raised)
+
+    async def test_a_core_that_hangs_after_a_good_start_is_hard_reset_once(self):
+        threshold = 2
+        for make in (self.grpc_node, self.rest_node):
+            with self.subTest(transport=make.__name__):
+                core = FakeNodeCore(delay=0.05)
+                node = await make(core, sync_lease_seconds=1.0)
+                node._hard_reset_threshold = threshold
+                raised = self.watch_hard_reset(node)
+                await self.started(node, core, [user(f"good-{index}") for index in range(3)])
+                core.reject_all = True
+                core.dead_error = HUNG_CORE_ERROR
                 for index in range(8):
                     await node.update_user(user(f"fresh-{index}"))
                     await asyncio.sleep(0.3)

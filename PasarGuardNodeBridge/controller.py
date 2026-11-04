@@ -79,7 +79,7 @@ class FailedUsers(list):
         self.detail = detail
 
 
-_CORE_UNREACHABLE = ("code = Unavailable", "connection refused")
+_CORE_UNREACHABLE = ("code = Unavailable", "code = DeadlineExceeded", "connection refused")
 
 
 def core_unreachable(detail: str) -> bool:
