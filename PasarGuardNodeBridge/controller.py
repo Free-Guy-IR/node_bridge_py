@@ -2,6 +2,7 @@ import asyncio
 import itertools
 import logging
 import math
+import re
 import ssl
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -79,12 +80,15 @@ class FailedUsers(list):
         self.detail = detail
 
 
-_CORE_UNREACHABLE = ("code = Unavailable", "code = DeadlineExceeded", "connection refused")
+_CORE_UNREACHABLE = re.compile(
+    r"rpc error: code = (?:Unavailable|DeadlineExceeded) desc = "
+    r"|dial tcp4? 127\.0\.0\.1:\d+: connect: connection refused$"
+)
 
 
 def core_unreachable(detail: str) -> bool:
     errors = [line.strip() for line in detail.replace("failed to update users:", "\n").splitlines() if line.strip()]
-    return bool(errors) and all(any(signal in error for signal in _CORE_UNREACHABLE) for error in errors)
+    return bool(errors) and all(_CORE_UNREACHABLE.match(error) for error in errors)
 
 
 class _Delivery(list):

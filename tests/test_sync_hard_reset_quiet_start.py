@@ -316,3 +316,22 @@ class QuietStartedNodeTests(SyncFakeTestCase):
                 self.assertGreater(core.sends_with("fresh-7"), 0)
                 self.assertEqual(node._user_sync_failure_count, 0)
                 self.assertEqual(raised, [])
+
+    async def test_a_live_rejection_that_mentions_connection_refused_never_hard_resets_a_started_node(self):
+        threshold = 2
+        for make in (self.grpc_node, self.rest_node):
+            with self.subTest(transport=make.__name__):
+                core = FakeNodeCore(delay=0.05)
+                node = await make(core, sync_lease_seconds=1.0)
+                node._hard_reset_threshold = threshold
+                raised = self.watch_hard_reset(node)
+                await self.started(node, core, [user(f"good-{index}") for index in range(3)])
+                core.reject_all = True
+                core.dead_error = "failed to update users:\ninvalid user a: upstream connection refused by policy"
+                for index in range(8):
+                    await node.update_user(user(f"fresh-{index}"))
+                    await asyncio.sleep(0.3)
+                await asyncio.sleep(backoff_before_threshold(threshold) + 4)
+                self.assertGreater(core.sends_with("fresh-7"), 0)
+                self.assertEqual(node._user_sync_failure_count, 0)
+                self.assertEqual(raised, [])
