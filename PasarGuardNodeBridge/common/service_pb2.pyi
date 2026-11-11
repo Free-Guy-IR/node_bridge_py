@@ -13,7 +13,6 @@ class BackendType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     WIREGUARD: _ClassVar[BackendType]
     SING_BOX: _ClassVar[BackendType]
     OPEN_VPN: _ClassVar[BackendType]
-    MTPROTO: _ClassVar[BackendType]
     L2TP: _ClassVar[BackendType]
 
 class StatType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
@@ -28,7 +27,6 @@ XRAY: BackendType
 WIREGUARD: BackendType
 SING_BOX: BackendType
 OPEN_VPN: BackendType
-MTPROTO: BackendType
 L2TP: BackendType
 Outbounds: StatType
 Outbound: StatType
@@ -231,12 +229,14 @@ class Shadowsocks(_message.Message):
     def __init__(self, password: _Optional[str] = ..., method: _Optional[str] = ...) -> None: ...
 
 class Wireguard(_message.Message):
-    __slots__ = ("public_key", "peer_ips")
+    __slots__ = ("public_key", "peer_ips", "pre_shared_key")
     PUBLIC_KEY_FIELD_NUMBER: _ClassVar[int]
     PEER_IPS_FIELD_NUMBER: _ClassVar[int]
+    PRE_SHARED_KEY_FIELD_NUMBER: _ClassVar[int]
     public_key: str
     peer_ips: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, public_key: _Optional[str] = ..., peer_ips: _Optional[_Iterable[str]] = ...) -> None: ...
+    pre_shared_key: str
+    def __init__(self, public_key: _Optional[str] = ..., peer_ips: _Optional[_Iterable[str]] = ..., pre_shared_key: _Optional[str] = ...) -> None: ...
 
 class Hysteria(_message.Message):
     __slots__ = ("auth",)
@@ -265,14 +265,6 @@ class OpenVpnUser(_message.Message):
     max_concurrent_connections: int
     def __init__(self, username: _Optional[str] = ..., password: _Optional[str] = ..., max_concurrent_connections: _Optional[int] = ...) -> None: ...
 
-class MtprotoUser(_message.Message):
-    __slots__ = ("username", "secret")
-    USERNAME_FIELD_NUMBER: _ClassVar[int]
-    SECRET_FIELD_NUMBER: _ClassVar[int]
-    username: str
-    secret: str
-    def __init__(self, username: _Optional[str] = ..., secret: _Optional[str] = ...) -> None: ...
-
 class Tuic(_message.Message):
     __slots__ = ("uuid", "password")
     UUID_FIELD_NUMBER: _ClassVar[int]
@@ -290,7 +282,7 @@ class L2tpUser(_message.Message):
     def __init__(self, username: _Optional[str] = ..., password: _Optional[str] = ...) -> None: ...
 
 class Proxy(_message.Message):
-    __slots__ = ("vmess", "vless", "trojan", "shadowsocks", "wireguard", "hysteria", "hysteria2", "open_vpn", "mtproto", "tuic", "l2tp", "masque")
+    __slots__ = ("vmess", "vless", "trojan", "shadowsocks", "wireguard", "hysteria", "hysteria2", "open_vpn", "tuic", "l2tp", "masque")
     VMESS_FIELD_NUMBER: _ClassVar[int]
     VLESS_FIELD_NUMBER: _ClassVar[int]
     TROJAN_FIELD_NUMBER: _ClassVar[int]
@@ -299,7 +291,6 @@ class Proxy(_message.Message):
     HYSTERIA_FIELD_NUMBER: _ClassVar[int]
     HYSTERIA2_FIELD_NUMBER: _ClassVar[int]
     OPEN_VPN_FIELD_NUMBER: _ClassVar[int]
-    MTPROTO_FIELD_NUMBER: _ClassVar[int]
     TUIC_FIELD_NUMBER: _ClassVar[int]
     L2TP_FIELD_NUMBER: _ClassVar[int]
     MASQUE_FIELD_NUMBER: _ClassVar[int]
@@ -311,11 +302,10 @@ class Proxy(_message.Message):
     hysteria: Hysteria
     hysteria2: Hysteria2
     open_vpn: OpenVpnUser
-    mtproto: MtprotoUser
     tuic: Tuic
     l2tp: L2tpUser
     masque: Masque
-    def __init__(self, vmess: _Optional[_Union[Vmess, _Mapping]] = ..., vless: _Optional[_Union[Vless, _Mapping]] = ..., trojan: _Optional[_Union[Trojan, _Mapping]] = ..., shadowsocks: _Optional[_Union[Shadowsocks, _Mapping]] = ..., wireguard: _Optional[_Union[Wireguard, _Mapping]] = ..., hysteria: _Optional[_Union[Hysteria, _Mapping]] = ..., hysteria2: _Optional[_Union[Hysteria2, _Mapping]] = ..., open_vpn: _Optional[_Union[OpenVpnUser, _Mapping]] = ..., mtproto: _Optional[_Union[MtprotoUser, _Mapping]] = ..., tuic: _Optional[_Union[Tuic, _Mapping]] = ..., l2tp: _Optional[_Union[L2tpUser, _Mapping]] = ..., masque: _Optional[_Union[Masque, _Mapping]] = ...) -> None: ...
+    def __init__(self, vmess: _Optional[_Union[Vmess, _Mapping]] = ..., vless: _Optional[_Union[Vless, _Mapping]] = ..., trojan: _Optional[_Union[Trojan, _Mapping]] = ..., shadowsocks: _Optional[_Union[Shadowsocks, _Mapping]] = ..., wireguard: _Optional[_Union[Wireguard, _Mapping]] = ..., hysteria: _Optional[_Union[Hysteria, _Mapping]] = ..., hysteria2: _Optional[_Union[Hysteria2, _Mapping]] = ..., open_vpn: _Optional[_Union[OpenVpnUser, _Mapping]] = ..., tuic: _Optional[_Union[Tuic, _Mapping]] = ..., l2tp: _Optional[_Union[L2tpUser, _Mapping]] = ..., masque: _Optional[_Union[Masque, _Mapping]] = ...) -> None: ...
 
 class User(_message.Message):
     __slots__ = ("email", "proxies", "inbounds")

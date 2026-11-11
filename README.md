@@ -1,8 +1,8 @@
 # PasarGuard Node Bridge (Python)
 
-> Note: This is the [Free-Guy-IR](https://github.com/Free-Guy-IR) fork of the original [PasarGuard node_bridge_py](https://github.com/Free-Guy-IR/node_bridge_py), extended with sing-box, OpenVPN, MTProto and L2TP backends, Hysteria2, OpenVPN, MTProto, TUIC and L2TP user credentials, and several backends on one node (`add_backend`, `remove_backend`, `list_backends`).
+> Note: This is the [Free-Guy-IR](https://github.com/Free-Guy-IR) fork of the original [PasarGuard node_bridge_py](https://github.com/PasarGuard/node_bridge_py), extended with sing-box, OpenVPN and L2TP backends, Hysteria2, OpenVPN, TUIC and L2TP user credentials, and several backends on one node (`add_backend`, `remove_backend`, `list_backends`).
 
-> Wire compatibility: this fork numbers `BackendType` 2 to 5 as SING_BOX, OPEN_VPN, MTPROTO and L2TP, and `Proxy` fields 7 to 12 as Hysteria2, OpenVPN, MTProto, TUIC, L2TP and Masque. Upstream PasarGuard gives `BackendType` 2 to its own MTProto backend, `Proxy` field 7 to Masque and field 8 to its own Mtproto message (bridge 0.10.0 and the node's dev branch). Upstream node 0.5.4 refuses backend types 2 to 5 and ignores fields 7 to 12. Upstream nodes 0.5.6 and 0.5.7 read a fork user's Hysteria2 password as a Masque password. An upstream node with MTProto reads backend type 2 as MTProto and a fork user's OpenVPN credentials as MTProto credentials. Only the xray and WireGuard backends work the same on upstream nodes, and an upstream bridge must never drive a [Free-Guy-IR node](https://github.com/Free-Guy-IR/node).
+> Wire compatibility: this fork numbers `BackendType` 2, 3 and 5 as SING_BOX, OPEN_VPN and L2TP, and `Proxy` fields 7, 8, 10, 11 and 12 as Hysteria2, OpenVPN, TUIC, L2TP and Masque. `BackendType` 4 and `Proxy` field 9, where the fork's MTProto backend and credential used to be, are reserved by number and by name, as on the [Free-Guy-IR node](https://github.com/Free-Guy-IR/node) since its MTProto backend was removed. `Wireguard` field 3 is `pre_shared_key` here and upstream. Upstream PasarGuard gives `BackendType` 2 to its own MTProto backend, `Proxy` field 7 to Masque and field 8 to its own Mtproto message (bridge 0.10.0 and the node's dev branch). Upstream node 0.5.4 refuses backend types 2 to 5 and ignores fields 7 to 12. Upstream nodes 0.5.6 and 0.5.7 read a fork user's Hysteria2 password as a Masque password. An upstream node with MTProto reads backend type 2 as MTProto and a fork user's OpenVPN credentials as MTProto credentials. Only the xray and WireGuard backends work the same on upstream nodes, and an upstream bridge must never drive a [Free-Guy-IR node](https://github.com/Free-Guy-IR/node).
 
 Async Python client for connecting to a [PasarGuard node](https://github.com/PasarGuard/node) over `gRPC` or `REST`.
 
@@ -134,7 +134,7 @@ print(info.node_version, info.core_version)
 await node.stop()
 ```
 
-`backend_type` accepts `XRAY`, `WIREGUARD`, `SING_BOX`, `OPEN_VPN`, `MTPROTO` or `L2TP`.
+`backend_type` accepts `XRAY`, `WIREGUARD`, `SING_BOX`, `OPEN_VPN` or `L2TP`.
 
 ## Method Examples
 

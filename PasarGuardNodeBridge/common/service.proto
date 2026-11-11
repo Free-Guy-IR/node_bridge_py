@@ -22,8 +22,9 @@ enum BackendType {
   WIREGUARD = 1;
   SING_BOX = 2;
   OPEN_VPN = 3;
-  MTPROTO = 4;
   L2TP = 5;
+  reserved 4;
+  reserved "MTPROTO";
 }
 
 message Backend {
@@ -139,6 +140,7 @@ message Shadowsocks {
 message Wireguard {
     string public_key = 1;
     repeated string peer_ips = 2;
+    string pre_shared_key = 3;
 }
 
 message Hysteria {
@@ -170,16 +172,6 @@ message OpenVpnUser {
     uint32 max_concurrent_connections = 3;
 }
 
-// MTProto (Telegram) proxy credential. Unlike every other protocol here,
-// many users share ONE listener/process (see backend/mtproto) - secret is
-// this user's individual MTProto secret (16 bytes, hex-encoded, no "ee"
-// prefix/host suffix - the backend derives the full client-facing secret
-// from this plus the instance's own fake-TLS domain).
-message MtprotoUser {
-    string username = 1;
-    string secret = 2;
-}
-
 message Tuic {
     string uuid = 1;
     string password = 2;
@@ -199,10 +191,11 @@ message Proxy {
     Hysteria hysteria = 6;
     Hysteria2 hysteria2 = 7;
     OpenVpnUser open_vpn = 8;
-    MtprotoUser mtproto = 9;
     Tuic tuic = 10;
     L2tpUser l2tp = 11;
     Masque masque = 12;
+    reserved 9;
+    reserved "mtproto";
 }
 
 message User {
