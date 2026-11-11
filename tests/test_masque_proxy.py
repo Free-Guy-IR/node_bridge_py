@@ -74,7 +74,6 @@ class Hysteria2FieldUnchangedTest(unittest.TestCase):
                 "hysteria": 6,
                 "hysteria2": 7,
                 "open_vpn": 8,
-                "mtproto": 9,
                 "tuic": 10,
                 "l2tp": 11,
                 "masque": 12,
