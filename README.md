@@ -35,7 +35,7 @@ pasarguard-node-bridge = { git = "https://github.com/Free-Guy-IR/node_bridge_py"
 - A reachable PasarGuard node
 - Node service port (`port`) for gRPC or protobuf-REST
 - Node JSON API port (`api_port`) for maintenance endpoints
-- Server CA certificate content (PEM string)
+- Optional PEM trust certificates or a SHA-256 leaf certificate fingerprint
 - API key (UUID string)
 
 ## Import
@@ -51,14 +51,14 @@ from PasarGuardNodeBridge.common import service_pb2 as service
 node = Bridge.create_node(
     connection=Bridge.NodeType.grpc,  # Bridge.NodeType.grpc or Bridge.NodeType.rest
     address="127.0.0.1",
-    port=2096,                         # gRPC or protobuf-REST port (based on connection)
-    api_port=2097,                     # REST JSON API port (used internally for maintenance)
+    port=2096,  # gRPC or protobuf-REST port (based on connection)
+    api_port=2097,  # REST JSON API port (used internally for maintenance)
     server_ca=server_ca_pem_string,
     api_key="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    name="node-1",                     # optional
-    extra={"region": "eu-1"},          # optional
-    default_timeout=10,                # optional
-    internal_timeout=15,               # optional
+    name="node-1",  # optional
+    extra={"region": "eu-1"},  # optional
+    default_timeout=10,  # optional
+    internal_timeout=15,  # optional
     proxy="socks5://user:pass@127.0.0.1:1080",  # optional
 )
 ```
@@ -69,7 +69,8 @@ node = Bridge.create_node(
 - `address`: node host/IP
 - `port`: node service port
 - `api_port`: node REST JSON API port
-- `server_ca`: PEM certificate content as string
+- `server_ca`: optional PEM certificate content, defaulting to `None` for system trust
+- `certificate_sha256`: optional keyword-only SHA-256 leaf certificate fingerprint; takes precedence over PEM
 - `api_key`: UUID string
 - `name`: optional logger name
 - `extra`: optional metadata dictionary
@@ -79,6 +80,38 @@ node = Bridge.create_node(
 - `proxy`: optional upstream proxy URL for node traffic
 - `max_message_size`: gRPC only, HTTP/2 window/message sizing
 
+### TLS verification
+
+Every node and maintenance connection uses TLS and API-key authentication. Verification is selected
+from the saved fields, with no fallback after a failure:
+
+| Configuration | Verification |
+| --- | --- |
+| Nonempty `certificate_sha256` | Exact leaf certificate pin, validity dates, and domain/IP SAN |
+| Otherwise, nonempty `server_ca` | Existing PEM trust store and hostname verification |
+| Both absent/empty | Runtime system trust store and standard identity verification |
+
+`api_key` is required. Both `server_ca=None` and `certificate_sha256=None` are keyword-only. Existing keyword-based
+PEM configurations continue working. For a publicly trusted certificate, omit `server_ca` and
+`certificate_sha256` (or pass `server_ca=None`/`""`). For self-signed certificates, pass
+`certificate_sha256="ab..."` using the SHA-256 of the complete leaf certificate DER encoding.
+Contiguous hexadecimal and colon-separated byte pairs are accepted case-insensitively and normalized.
+Nonempty PEM is validated even when a pin takes precedence. Pinned verification requires a matching
+SAN; the Common Name is never used as a fallback.
+
+The main service and maintenance endpoints must present the same leaf certificate when pinned,
+including behind a TLS-terminating proxy. The address and both ports identify the TLS frontend;
+the bridge has no plaintext backend option. HTTP redirects are disabled. Pinned streams and pooled
+connections close at certificate expiry; reconnects repeat all verification before sending credentials.
+
+`NodeConfig` and registry helpers preserve the optional fingerprint through serialization. To change
+verification on a live client, use `await node.configure_tls(server_ca=pem, certificate_sha256=pin)`.
+This replaces both verification fields and retires existing connections and pools. Omitted fields
+are cleared: `await node.configure_tls()` selects system trust, and
+`await node.configure_tls(server_ca=pem)` restores PEM verification. Invalid replacement fields leave
+the current connections intact. Panel applications may instead dispose of the old client and create
+a new one whenever either verification field changes.
+
 ### Proxy Formats
 
 - `socks5://127.0.0.1:1080`
@@ -87,6 +120,12 @@ node = Bridge.create_node(
 - `http://127.0.0.1:3128`
 - `http://user:pass@127.0.0.1:3128`
 - `https://user:pass@proxy.example.com:443`
+
+REST and maintenance requests support HTTPS proxies with certificate pinning. The proxy certificate
+is verified against the runtime system trust store, including its hostname, before proxy credentials
+are sent. The node certificate is verified separately against `certificate_sha256` inside the tunnel.
+For a private proxy CA, configure the runtime trust store (for example, `SSL_CERT_FILE`);
+`server_ca` and `certificate_sha256` describe the node. gRPC does not support HTTPS proxies.
 
 ### Connection Types
 
@@ -122,9 +161,9 @@ You should `start()` before calling stats/sync/log methods.
 await node.start(
     config=config_json_string,
     backend_type=service.BackendType.XRAY,
-    users=[user],                             # optional initial user set
-    keep_alive=30,                            # optional
-    exclude_inbounds=[],                      # optional
+    users=[user],  # optional initial user set
+    keep_alive=30,  # optional
+    exclude_inbounds=[],  # optional
     timeout=20,
 )
 
@@ -371,6 +410,7 @@ Use a deferred loader when a full snapshot must coexist with queued updates:
 async def load_users():
     return await application.load_current_node_users(node.node_id)
 
+
 await node.sync_users_from_source(load_users, timeout=30)
 ```
 
@@ -498,7 +538,7 @@ single_user_ips = await node.get_user_online_ip_list("alice@example.com")
 ### 5. Health And Version Helpers
 
 ```python
-health = await node.get_health()            # Bridge.Health enum
+health = await node.get_health()  # Bridge.Health enum
 node_ver = await node.node_version()
 core_ver = await node.core_version()
 node_ver2, core_ver2 = await node.get_versions()
@@ -564,9 +604,7 @@ route = await node.test_route(
 # `rule` is one xray routing rule as JSON (same shape as a routing.rules[] entry).
 # Appended by default (keeps existing rules); pass should_reset=True to clear all
 # rules + balancers before adding.
-await node.add_routing_rule(
-    '{"type":"field","outboundTag":"direct","domain":["example.com"],"ruleTag":"r1"}'
-)
+await node.add_routing_rule('{"type":"field","outboundTag":"direct","domain":["example.com"],"ruleTag":"r1"}')
 await node.remove_routing_rule("r1")
 await node.override_balancer_target("balancer-tag", "outbound-tag")
 ```
