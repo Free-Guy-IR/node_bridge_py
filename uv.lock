@@ -615,7 +615,7 @@ wheels = [
 
 [[package]]
 name = "pasarguard-node-bridge"
-version = "0.10.0+singbox.1"
+version = "0.11.2+singbox.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
