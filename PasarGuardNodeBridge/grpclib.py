@@ -7,10 +7,10 @@ import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from types import TracebackType
-from typing import Any, NoReturn, Self, TypeVar
+from typing import Any, NoReturn, Self, TypeVar, cast
 
 from google.protobuf.message import Message
-from grpclib.client import Channel, Stream, UnaryUnaryMethod
+from grpclib.client import Channel, Handler, Stream, UnaryUnaryMethod
 from grpclib.config import Configuration
 from grpclib.const import Status
 from grpclib.exceptions import GRPCError, StreamTerminatedError
@@ -53,12 +53,27 @@ class _CountedStream:
             self._channel._call_closed()
 
 
+class _AbortOnCloseProtocol(H2Protocol):
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        super().connection_made(transport)
+        graceful_close = self.connection.close
+
+        def close() -> None:
+            graceful_close()
+            cast(asyncio.Transport, transport).abort()
+
+        self.connection.close = close
+
+
 class RetirableChannel(Channel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._open_calls = 0
         self._retired = False
         self._grace_timer: asyncio.TimerHandle | None = None
+
+    def _protocol_factory(self) -> H2Protocol:
+        return _AbortOnCloseProtocol(Handler(), self._config, self._h2_config)
 
     def request(self, *args, **kwargs):
         return _CountedStream(self, super().request(*args, **kwargs))
