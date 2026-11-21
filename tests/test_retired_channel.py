@@ -20,6 +20,7 @@ NODE_VERSION = "0.6.22"
 CORE = "1.0"
 SETTLE = 2.0
 INTERLEAVING_ROUNDS = 60
+TLS_RECONFIGURATION_ROUNDS = 20
 TEARDOWN_SETTLE = 8.0
 HELD_CALL_TIMEOUT = 20
 
@@ -153,6 +154,11 @@ def make_node(port: int, name: str, server_ca: str) -> GrpcNode:
         default_timeout=5,
         internal_timeout=5,
     )
+
+
+async def backend_stats_after(node: GrpcNode, delay: float):
+    await asyncio.sleep(delay)
+    return await node.get_backend_stats(timeout=5)
 
 
 @dataclass
@@ -293,6 +299,28 @@ class RetiredChannelTests(unittest.IsolatedAsyncioTestCase):
         await node.stop()
         node._close_chan()
         self.assertEqual(await self.relay.settle_to(0), 0)
+
+    async def test_tls_reconfigurations_racing_calls_keep_one_connection_and_close_cleanly(self):
+        for round_index in range(TLS_RECONFIGURATION_ROUNDS):
+            rng = random.Random(round_index)
+            node = self.node(f"reconfigure-{round_index}")
+            await self.reconnect(node, pings=rng.random() < 0.5)
+            racing = [asyncio.create_task(backend_stats_after(node, rng.uniform(0, 0.02))) for _ in range(6)]
+            self.pending += racing
+            await asyncio.sleep(rng.uniform(0, 0.01))
+            await node.configure_tls(server_ca=self.server_ca)
+            after = [asyncio.create_task(node.get_backend_stats(timeout=5)) for _ in range(3)]
+            self.pending += after
+            raced = await asyncio.gather(*racing, return_exceptions=True)
+            unexpected = [r for r in raced if isinstance(r, BaseException) and not isinstance(r, NodeAPIError)]
+            self.assertEqual(unexpected, [], f"round {round_index}")
+            for result in await asyncio.gather(*after):
+                self.assertIsNotNone(result, f"round {round_index}")
+            self.assertEqual(await self.relay.settle_to(0, within=0.3), 1, f"round {round_index}")
+            await node.stop()
+            node._close_chan()
+            self.assertEqual(await self.relay.settle_to(0), 0, f"round {round_index}")
+        await self.assert_server_shuts_down_promptly()
 
     async def test_a_call_that_reopens_a_closed_channel_does_not_keep_the_connection(self):
         node = self.node("reopened")
