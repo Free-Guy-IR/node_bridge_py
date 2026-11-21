@@ -1,4 +1,5 @@
 import asyncio
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -9,8 +10,9 @@ from grpclib.server import Server
 import PasarGuardNodeBridge.grpclib as grpc_transport
 from PasarGuardNodeBridge import NodeAPIError
 from PasarGuardNodeBridge.common import service_pb2
-from PasarGuardNodeBridge.common.service_grpc import NodeServiceBase, NodeServiceStub
+from PasarGuardNodeBridge.common.service_grpc import NodeServiceBase
 from PasarGuardNodeBridge.grpclib import Node as GrpcNode
+from tests.test_tls import certificate
 
 
 async def _backend_stats(self, stream):
@@ -72,29 +74,30 @@ class SilentProxy:
         self.server.close()
 
 
-def _node(port: int = 1, **kwargs) -> GrpcNode:
-    with patch("ssl.SSLContext.load_verify_locations"):
-        node = GrpcNode(
-            address="127.0.0.1",
-            port=port,
-            api_port=port,
-            server_ca="test",
-            api_key=str(uuid4()),
-            name="keepalive",
-            **kwargs,
-        )
-    node.ctx = None
-    node.channel.close()
-    node.channel = node._make_channel(keepalive=False)
-    node._client = NodeServiceStub(node.channel)
-    return node
+def _tls():
+    with tempfile.TemporaryDirectory() as directory:
+        server_ssl, server_ca, _ = certificate(directory)
+    return server_ssl, server_ca
+
+
+def _node(port: int, server_ca: str, **kwargs) -> GrpcNode:
+    return GrpcNode(
+        address="127.0.0.1",
+        port=port,
+        api_port=port,
+        server_ca=server_ca,
+        api_key=str(uuid4()),
+        name="keepalive",
+        **kwargs,
+    )
 
 
 class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        server_ssl, self.server_ca = _tls()
         self.service = _service()
         self.server = Server([self.service])
-        await self.server.start("127.0.0.1", 0)
+        await self.server.start("127.0.0.1", 0, ssl=server_ssl)
         self.port = self.server._server.sockets[0].getsockname()[1]
 
     async def asyncTearDown(self):
@@ -108,7 +111,7 @@ class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
         return node.channel._config._keepalive_time is not None
 
     async def test_a_node_that_reports_the_policy_version_but_does_not_advertise_it_gets_no_pings(self):
-        node = _node(self.port)
+        node = _node(self.port, self.server_ca)
         await node.connect("0.6.21", "26.3.27")
         self.assertFalse(self.pings(node))
         node._close_chan()
@@ -116,7 +119,7 @@ class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_node_that_advertises_the_ping_policy_gets_pings_whatever_its_version(self):
         self.advertise("keepalive-policy-v1")
         for version in ("0.6.20", "0.6.22", "dev-build"):
-            node = _node(self.port)
+            node = _node(self.port, self.server_ca)
             await node.connect(version, "26.3.27")
             config = node.channel._config
             self.assertEqual(config._keepalive_time, grpc_transport.KEEPALIVE_TIME, version)
@@ -135,25 +138,29 @@ class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
             (",", False),
         ):
             self.advertise(header)
-            node = _node(self.port)
+            node = _node(self.port, self.server_ca)
             await node.connect("0.6.21", "26.3.27")
             self.assertEqual(self.pings(node), expected, header)
             node._close_chan()
 
     async def test_a_node_that_cannot_be_probed_gets_no_pings(self):
-        node = _node(1)
+        node = _node(1, self.server_ca)
         await node.connect("0.6.21", "26.3.27")
         self.assertFalse(self.pings(node))
         node._close_chan()
 
     async def test_a_rotated_channel_stays_open_long_enough_for_calls_already_on_it(self):
         self.advertise("keepalive-policy-v1")
-        node = _node(self.port)
+        node = _node(self.port, self.server_ca)
         retired = node.channel
         loop = asyncio.get_running_loop()
         with patch.object(loop, "call_later") as scheduled:
             await node.connect("0.6.21", "26.3.27")
-        delay, callback = scheduled.call_args.args
+        grace_timers = [
+            call.args for call in scheduled.call_args_list if getattr(call.args[1], "__self__", None) is retired
+        ]
+        self.assertEqual(len(grace_timers), 1)
+        delay, callback = grace_timers[0]
         self.assertIs(callback.__self__, retired)
         self.assertGreaterEqual(delay, grpc_transport.RETIRED_CHANNEL_GRACE)
         self.assertGreater(grpc_transport.RETIRED_CHANNEL_GRACE, node._default_timeout + node._internal_timeout * 20)
@@ -161,7 +168,7 @@ class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
         node._close_chan()
 
     async def test_a_node_that_reconnects_after_an_upgrade_starts_getting_pings(self):
-        node = _node(self.port)
+        node = _node(self.port, self.server_ca)
         await node.connect("0.6.21", "26.3.27")
         self.assertFalse(self.pings(node))
         self.advertise("keepalive-policy-v1")
@@ -175,15 +182,16 @@ class KeepaliveGateTests(unittest.IsolatedAsyncioTestCase):
 
 class SilentPeerTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_node_whose_network_goes_silent_is_detected_before_the_rpc_timeout(self):
+        server_ssl, server_ca = _tls()
         server = Server([_service("keepalive-policy-v1")])
-        await server.start("127.0.0.1", 0)
+        await server.start("127.0.0.1", 0, ssl=server_ssl)
         proxy = SilentProxy(server._server.sockets[0].getsockname()[1])
         port = await proxy.start()
         with (
             patch.object(grpc_transport, "KEEPALIVE_TIME", 0.3),
             patch.object(grpc_transport, "KEEPALIVE_TIMEOUT", 0.5),
         ):
-            node = _node(port, default_timeout=5, internal_timeout=5)
+            node = _node(port, server_ca, default_timeout=5, internal_timeout=5)
             try:
                 await node.connect("0.6.21", "26.3.27")
                 self.assertIsNotNone(await node.get_backend_stats(timeout=5))

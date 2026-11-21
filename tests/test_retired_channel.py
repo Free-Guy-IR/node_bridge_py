@@ -1,19 +1,19 @@
 import asyncio
 import logging
 import random
+import tempfile
 import unittest
 from dataclasses import dataclass
-from unittest.mock import patch
 from uuid import uuid4
 
 from grpclib.const import Cardinality, Handler
 from grpclib.server import Server
 
 from PasarGuardNodeBridge import NodeAPIError
-from PasarGuardNodeBridge.common import service_grpc
 from PasarGuardNodeBridge.common import service_pb2 as service
 from PasarGuardNodeBridge.grpclib import Node as GrpcNode
 from PasarGuardNodeBridge.storage import InMemoryNodeLifecycleCoordinator, InMemoryUserSyncStore
+from tests.test_tls import certificate
 
 PING_POLICY = "keepalive-policy-v1"
 NODE_VERSION = "0.6.22"
@@ -138,27 +138,21 @@ class ConnectionCountingRelay:
         self.server.close()
 
 
-def make_node(port: int, name: str) -> GrpcNode:
-    with patch("ssl.SSLContext.load_verify_locations"):
-        node = GrpcNode(
-            address="127.0.0.1",
-            port=port,
-            api_port=1,
-            server_ca="test",
-            api_key=str(uuid4()),
-            name=name,
-            node_id=f"{name}-{uuid4()}",
-            user_sync_store=InMemoryUserSyncStore(),
-            lifecycle_coordinator=InMemoryNodeLifecycleCoordinator(),
-            logger=logger,
-            default_timeout=5,
-            internal_timeout=5,
-        )
-    node.channel.close()
-    node.ctx = None
-    node.channel = node._make_channel(keepalive=False)
-    node._client = service_grpc.NodeServiceStub(node.channel)
-    return node
+def make_node(port: int, name: str, server_ca: str) -> GrpcNode:
+    return GrpcNode(
+        address="127.0.0.1",
+        port=port,
+        api_port=1,
+        server_ca=server_ca,
+        api_key=str(uuid4()),
+        name=name,
+        node_id=f"{name}-{uuid4()}",
+        user_sync_store=InMemoryUserSyncStore(),
+        lifecycle_coordinator=InMemoryNodeLifecycleCoordinator(),
+        logger=logger,
+        default_timeout=5,
+        internal_timeout=5,
+    )
 
 
 @dataclass
@@ -174,9 +168,11 @@ class CallOutcome:
 
 class RetiredChannelTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server_ssl, self.server_ca, _ = certificate(directory)
         self.service = FakeNodeService()
         self.server = Server([self.service])
-        await self.server.start("127.0.0.1", 0)
+        await self.server.start("127.0.0.1", 0, ssl=server_ssl)
         self.relay = ConnectionCountingRelay(self.server._server.sockets[0].getsockname()[1])
         self.port = await self.relay.start()
         self.nodes = []
@@ -197,7 +193,7 @@ class RetiredChannelTests(unittest.IsolatedAsyncioTestCase):
             pass
 
     def node(self, name: str) -> GrpcNode:
-        node = make_node(self.port, name)
+        node = make_node(self.port, name, self.server_ca)
         self.nodes.append(node)
         return node
 
