@@ -262,6 +262,12 @@ class Node(PasarGuardNode):
         self._retired_channels.add(retired)
         retired.retire(RETIRED_CHANNEL_GRACE)
 
+    async def configure_tls(self, *, server_ca: str | None = None, certificate_sha256: str | None = None) -> None:
+        await super().configure_tls(server_ca=server_ca, certificate_sha256=certificate_sha256)
+        self._retired_channels.add(self.channel)
+        self.channel = self._make_channel(keepalive=self._keepalive)
+        self._client = service_grpc.NodeServiceStub(self.channel)
+
     async def _probe_capabilities(self) -> frozenset[str]:
         try:
             async with (
