@@ -277,6 +277,23 @@ class RetiredChannelTests(unittest.IsolatedAsyncioTestCase):
         node._close_chan()
         self.assertEqual(await self.relay.settle_to(0), 0)
 
+    async def test_a_tls_reconfiguration_reconnects_once_and_keeps_the_new_connection(self):
+        node = self.node("reconfigured")
+        await self.reconnect(node, pings=True)
+        self.assertIsNotNone(await node.get_backend_stats(timeout=5))
+        self.assertEqual(await self.relay.settle_to(1), 1)
+        accepted = self.relay.accepted
+        await node.configure_tls(server_ca=self.server_ca)
+        self.assertEqual(await self.relay.settle_to(0), 0)
+        for _ in range(3):
+            self.assertIsNotNone(await node.get_backend_stats(timeout=5))
+        self.assertEqual(self.relay.accepted, accepted + 1)
+        self.assertEqual(await self.relay.settle_to(0, within=0.5), 1)
+        self.assertIsNotNone(node.channel._config._keepalive_time)
+        await node.stop()
+        node._close_chan()
+        self.assertEqual(await self.relay.settle_to(0), 0)
+
     async def test_a_call_that_reopens_a_closed_channel_does_not_keep_the_connection(self):
         node = self.node("reopened")
         await self.reconnect(node, pings=False)
