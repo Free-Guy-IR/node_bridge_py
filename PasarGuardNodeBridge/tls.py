@@ -117,6 +117,7 @@ class TLSPolicy:
             ctx.verify_mode = ssl.CERT_NONE
         else:
             ctx = ssl.create_default_context()
+            ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
             if self.server_ca:
                 ctx.load_verify_locations(cadata=self.server_ca)
         ctx.set_alpn_protocols([alpn])
