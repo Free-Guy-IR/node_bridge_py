@@ -316,6 +316,23 @@ class ReplacementSafetyTests(StalledNodeCase):
         self.assertEqual(self.relay.accepted, 1)
         self.assertEqual(self.relay.open, 1)
 
+    async def test_a_silent_timeout_on_a_closed_node_does_not_bring_back_a_live_channel(self):
+        node = await self.connected_node("closed")
+        node._close_chan()
+        self.assertEqual(await self.relay.settle_to(0), 0)
+        closed = node.channel
+        held = self.keep(node.get_system_stats(timeout=2))
+        await asyncio.wait_for(self.service.held_arrived.wait(), 2)
+        self.relay.stall()
+        with self.assertRaises(NodeAPIError):
+            await node.get_backend_stats(timeout=1)
+        self.assertIs(node.channel, closed)
+        with self.assertRaises(NodeAPIError):
+            await held
+        self.assertEqual(await self.relay.settle_to(0), 0)
+        self.assertIsNotNone(await node.get_backend_stats(timeout=5))
+        self.assertEqual(await self.relay.settle_to(0), 0)
+
 
 class SlowUploadSafetyTests(StalledNodeCase):
     server_window = GRPC_GO_INITIAL_WINDOW
