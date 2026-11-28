@@ -1,9 +1,9 @@
 import asyncio
+import itertools
 import logging
 import math
 import random
 import ssl
-import time
 import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -30,6 +30,8 @@ from PasarGuardNodeBridge.utils import format_host_for_url, grpc_to_http_status,
 RequestT = TypeVar("RequestT", bound=Message)
 ResponseT = TypeVar("ResponseT", bound=Message)
 
+_SEQUENCE = itertools.count(1)
+
 
 class _CountedStream:
     def __init__(self, channel: "RetirableChannel", stream: Stream):
@@ -55,7 +57,7 @@ class _CountedStream:
 
 
 class _AbortOnCloseProtocol(H2Protocol):
-    last_received: float | None = None
+    last_received = 0
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         super().connection_made(transport)
@@ -68,7 +70,7 @@ class _AbortOnCloseProtocol(H2Protocol):
         self.connection.close = close
 
     def data_received(self, data: bytes) -> None:
-        self.last_received = time.monotonic()
+        self.last_received = next(_SEQUENCE)
         super().data_received(data)
 
     def ping(self) -> None:
@@ -96,9 +98,9 @@ class RetirableChannel(Channel):
             return None
         return protocol
 
-    def silent_since(self, moment: float) -> bool:
+    def silent_since(self, mark: int) -> bool:
         protocol = self._open_protocol()
-        return protocol is not None and (protocol.last_received is None or protocol.last_received < moment)
+        return protocol is not None and protocol.last_received < mark
 
     def retire(self, grace: float) -> None:
         self._retired = True
@@ -111,15 +113,15 @@ class RetirableChannel(Channel):
         protocol = self._open_protocol()
         if protocol is None:
             return
-        asked_at = time.monotonic()
+        asked = next(_SEQUENCE)
         protocol.ping()
         self._ping_timer = asyncio.get_running_loop().call_later(
-            answer_within, self._close_if_unanswered, protocol, asked_at
+            answer_within, self._close_if_unanswered, protocol, asked
         )
 
-    def _close_if_unanswered(self, protocol: _AbortOnCloseProtocol, asked_at: float) -> None:
+    def _close_if_unanswered(self, protocol: _AbortOnCloseProtocol, asked: int) -> None:
         self._ping_timer = None
-        if self._protocol is protocol and self.silent_since(asked_at):
+        if self._protocol is protocol and self.silent_since(asked):
             self.close()
 
     def close(self) -> None:
@@ -309,17 +311,17 @@ class Node(PasarGuardNode):
         self.channel = self._make_channel(keepalive=self._keepalive)
         self._client = service_grpc.NodeServiceStub(self.channel)
 
-    def _recycle_silent_channel(self, channel: object, since: float) -> None:
+    def _recycle_silent_channel(self, channel: object, sent: int) -> None:
         if not isinstance(channel, RetirableChannel) or channel is not self.channel or channel._retired:
             return
-        if not channel.silent_since(since):
+        if not channel.silent_since(sent):
             return
         self.channel = self._make_channel(keepalive=self._keepalive)
         self._client = service_grpc.NodeServiceStub(self.channel)
         self._retired_channels.add(channel)
         channel.retire_unless_answered(RETIRED_CHANNEL_GRACE, SILENT_CONNECTION_PING_TIMEOUT)
         self.logger.warning(
-            f"[{self.name}] Nothing arrived from the node for {time.monotonic() - since:.1f}s; "
+            f"[{self.name}] Nothing arrived from the node since a call that timed out was sent; "
             "the next calls use a new connection"
         )
 
@@ -388,12 +390,12 @@ class Node(PasarGuardNode):
     ) -> ResponseT:
         """Handle a gRPC request and convert errors to NodeAPIError."""
         timeout = timeout or self._internal_timeout
-        sent_at = time.monotonic()
+        sent = next(_SEQUENCE)
         try:
             return await asyncio.wait_for(method(request, metadata=self._metadata), timeout=timeout)
         except Exception as e:
             if isinstance(e, TimeoutError):
-                self._recycle_silent_channel(getattr(method, "channel", None), sent_at)
+                self._recycle_silent_channel(getattr(method, "channel", None), sent)
             self._handle_error(e)
 
     async def start(
@@ -572,7 +574,7 @@ class Node(PasarGuardNode):
         budget = timeout + self._internal_timeout * (chunk_count + 2)
         async with self._node_lock:
             method = self._client.SyncUsersChunked
-            sent_at = time.monotonic()
+            sent = next(_SEQUENCE)
             try:
                 async with (
                     asyncio.timeout(budget),
@@ -598,7 +600,7 @@ class Node(PasarGuardNode):
                     return []
             except Exception as e:
                 if isinstance(e, TimeoutError):
-                    self._recycle_silent_channel(getattr(method, "channel", None), sent_at)
+                    self._recycle_silent_channel(getattr(method, "channel", None), sent)
                 error_type = type(e).__name__
                 self.logger.warning(
                     f"[{self.name}] Chunked gRPC sync failed for {len(users)} user(s) | Error: {error_type} - {e!s}"
