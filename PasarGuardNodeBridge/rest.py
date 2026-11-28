@@ -319,7 +319,7 @@ class Node(PasarGuardNode):
     async def sync_users(
         self, users: list[service.User], flush_pending: bool = False, timeout: int | None = None
     ) -> service.Empty | None:
-        timeout = timeout or self._default_timeout
+        timeout = self._sync_users_timeout(len(users), timeout)
         if flush_pending:
             await self.flush_pending_users()
 

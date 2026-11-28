@@ -50,6 +50,7 @@ MAINTENANCE_TIMEOUTS = {
     LifecycleOperation.UPDATE_GEOFILES: 330,
     LifecycleOperation.HARD_RESET: 90,
 }
+SYNC_USERS_PER_TIMEOUT_STEP = 100
 
 
 class NodeAPIError(Exception):
@@ -1105,6 +1106,11 @@ class Controller:
 
     def _next_wake_at(self) -> float:
         return min(self._next_retry_at(), self._systemic_hard_reset_due())
+
+    def _sync_users_timeout(self, user_count: int, timeout: int | None) -> float:
+        return (timeout or self._default_timeout) + self._internal_timeout * math.ceil(
+            user_count / SYNC_USERS_PER_TIMEOUT_STEP
+        )
 
     def _sync_wait_timeout(self) -> float:
         """The worker's idle timeout, shortened to wake when the next rejected user is due."""
