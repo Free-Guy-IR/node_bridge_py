@@ -22,6 +22,9 @@ NODE_VERSION = "0.6.22"
 CORE = "1.0"
 SETTLE = 3.0
 SHORT_PING_WINDOW = 0.5
+SLOW_REPLY_BYTES = 256 * 1024
+SLOW_LINK_BYTES_PER_SECOND = 64 * 1024
+GRPC_GO_INITIAL_WINDOW = 65535
 
 logger = logging.getLogger("stalled-channel-test")
 logger.setLevel(logging.CRITICAL)
@@ -266,6 +269,67 @@ class StalledConnectionTests(StalledNodeCase):
         self.assertEqual(self.service.synced_users, [["after"]])
         self.assertEqual(self.relay.accepted, 2)
         self.assertEqual(await self.relay.settle_to(1), 1)
+
+
+class ReplacementSafetyTests(StalledNodeCase):
+    async def test_a_replaced_connection_that_answers_the_ping_keeps_its_slow_calls(self):
+        node = await self.connected_node("slow-node", timeout=1)
+        first = node.channel
+        with patch.object(grpc_transport, "SILENT_CONNECTION_PING_TIMEOUT", SHORT_PING_WINDOW, create=True):
+            held = self.keep(node.get_system_stats(timeout=30))
+            await asyncio.wait_for(self.service.held_arrived.wait(), 2)
+            with self.assertRaises(NodeAPIError):
+                await node.get_system_stats(timeout=1)
+            self.assertIsNot(node.channel, first)
+            await asyncio.sleep(SHORT_PING_WINDOW + 2)
+            self.assertFalse(held.done())
+            self.assertEqual(self.relay.open, 1)
+            self.service.release.set()
+            self.assertIsInstance(await asyncio.wait_for(held, 5), service.SystemStatsResponse)
+        self.assertEqual(await self.relay.settle_to(0), 0)
+        self.assertIsNone(first._protocol)
+        self.assertIsNotNone(await node.get_backend_stats(timeout=5))
+        self.assertEqual(self.relay.accepted, 2)
+        self.assertEqual(await self.relay.settle_to(1), 1)
+
+    async def test_a_connection_still_delivering_a_slow_reply_is_not_replaced(self):
+        node = await self.connected_node("slow-download")
+        first = node.channel
+        self.relay.down_bytes_per_second = SLOW_LINK_BYTES_PER_SECOND
+        slow = self.keep(
+            node.get_stats(service.StatType.UsersStat, reset=False, name=str(SLOW_REPLY_BYTES), timeout=30)
+        )
+        await asyncio.sleep(0.3)
+        started = time.monotonic()
+        with self.assertRaises(NodeAPIError):
+            await node.get_system_stats(timeout=1)
+        reply = await asyncio.wait_for(slow, 20)
+        self.assertGreater(time.monotonic() - started, 1.5)
+        self.assertEqual(len(reply.stats[0].name), SLOW_REPLY_BYTES)
+        self.assertIs(node.channel, first)
+        self.assertEqual(self.relay.accepted, 1)
+        self.assertEqual(self.relay.open, 1)
+
+
+class SlowUploadSafetyTests(StalledNodeCase):
+    server_window = GRPC_GO_INITIAL_WINDOW
+
+    async def test_a_connection_still_taking_a_slow_upload_is_not_replaced(self):
+        node = await self.connected_node("slow-upload")
+        first = node.channel
+        users = [service.User(email=f"{index:06d}", inbounds=["i" * 480]) for index in range(512)]
+        self.relay.up_bytes_per_second = SLOW_LINK_BYTES_PER_SECOND
+        upload = self.keep(node.sync_users(users, timeout=30))
+        await asyncio.sleep(0.3)
+        started = time.monotonic()
+        with self.assertRaises(NodeAPIError):
+            await node.get_system_stats(timeout=1)
+        await asyncio.wait_for(upload, 20)
+        self.assertGreater(time.monotonic() - started, 1.5)
+        self.assertEqual(len(self.service.synced_users[-1]), len(users))
+        self.assertIs(node.channel, first)
+        self.assertEqual(self.relay.accepted, 1)
+        self.assertEqual(self.relay.open, 1)
 
 
 if __name__ == "__main__":

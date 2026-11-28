@@ -3,6 +3,7 @@ import logging
 import math
 import random
 import ssl
+import time
 import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -54,6 +55,8 @@ class _CountedStream:
 
 
 class _AbortOnCloseProtocol(H2Protocol):
+    last_received: float | None = None
+
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         super().connection_made(transport)
         graceful_close = self.connection.close
@@ -64,6 +67,14 @@ class _AbortOnCloseProtocol(H2Protocol):
 
         self.connection.close = close
 
+    def data_received(self, data: bytes) -> None:
+        self.last_received = time.monotonic()
+        super().data_received(data)
+
+    def ping(self) -> None:
+        self.connection._connection.ping(bytes(8))
+        self.connection.flush()
+
 
 class RetirableChannel(Channel):
     def __init__(self, *args, **kwargs):
@@ -71,6 +82,7 @@ class RetirableChannel(Channel):
         self._open_calls = 0
         self._retired = False
         self._grace_timer: asyncio.TimerHandle | None = None
+        self._ping_timer: asyncio.TimerHandle | None = None
 
     def _protocol_factory(self) -> H2Protocol:
         return _AbortOnCloseProtocol(Handler(), self._config, self._h2_config)
@@ -78,17 +90,45 @@ class RetirableChannel(Channel):
     def request(self, *args, **kwargs):
         return _CountedStream(self, super().request(*args, **kwargs))
 
+    def _open_protocol(self) -> _AbortOnCloseProtocol | None:
+        protocol = self._protocol
+        if not self._connected or not isinstance(protocol, _AbortOnCloseProtocol) or protocol.connection.is_closing():
+            return None
+        return protocol
+
+    def silent_since(self, moment: float) -> bool:
+        protocol = self._open_protocol()
+        return protocol is not None and (protocol.last_received is None or protocol.last_received < moment)
+
     def retire(self, grace: float) -> None:
         self._retired = True
         self._grace_timer = asyncio.get_running_loop().call_later(grace, self.close)
         if not self._open_calls:
             self.close()
 
+    def retire_unless_answered(self, grace: float, answer_within: float) -> None:
+        self.retire(grace)
+        protocol = self._open_protocol()
+        if protocol is None:
+            return
+        asked_at = time.monotonic()
+        protocol.ping()
+        self._ping_timer = asyncio.get_running_loop().call_later(
+            answer_within, self._close_if_unanswered, protocol, asked_at
+        )
+
+    def _close_if_unanswered(self, protocol: _AbortOnCloseProtocol, asked_at: float) -> None:
+        self._ping_timer = None
+        if self._protocol is protocol and self.silent_since(asked_at):
+            self.close()
+
     def close(self) -> None:
         self._retired = True
-        if self._grace_timer is not None:
-            self._grace_timer.cancel()
-            self._grace_timer = None
+        for timer in (self._grace_timer, self._ping_timer):
+            if timer is not None:
+                timer.cancel()
+        self._grace_timer = None
+        self._ping_timer = None
         super().close()
 
     def _call_opened(self) -> None:
@@ -155,6 +195,7 @@ CAPABILITY_PROBE_TIMEOUT = 5.0
 KEEPALIVE_TIME = 10.0
 KEEPALIVE_TIMEOUT = 10.0
 RETIRED_CHANNEL_GRACE = 600.0
+SILENT_CONNECTION_PING_TIMEOUT = 10.0
 
 
 def parse_capabilities(value: str | bytes | None) -> frozenset[str]:
@@ -268,6 +309,20 @@ class Node(PasarGuardNode):
         self.channel = self._make_channel(keepalive=self._keepalive)
         self._client = service_grpc.NodeServiceStub(self.channel)
 
+    def _recycle_silent_channel(self, channel: object, since: float) -> None:
+        if not isinstance(channel, RetirableChannel) or channel is not self.channel or channel._retired:
+            return
+        if not channel.silent_since(since):
+            return
+        self.channel = self._make_channel(keepalive=self._keepalive)
+        self._client = service_grpc.NodeServiceStub(self.channel)
+        self._retired_channels.add(channel)
+        channel.retire_unless_answered(RETIRED_CHANNEL_GRACE, SILENT_CONNECTION_PING_TIMEOUT)
+        self.logger.warning(
+            f"[{self.name}] Nothing arrived from the node for {time.monotonic() - since:.1f}s; "
+            "the next calls use a new connection"
+        )
+
     async def _probe_capabilities(self) -> frozenset[str]:
         try:
             async with (
@@ -333,9 +388,12 @@ class Node(PasarGuardNode):
     ) -> ResponseT:
         """Handle a gRPC request and convert errors to NodeAPIError."""
         timeout = timeout or self._internal_timeout
+        sent_at = time.monotonic()
         try:
             return await asyncio.wait_for(method(request, metadata=self._metadata), timeout=timeout)
         except Exception as e:
+            if isinstance(e, TimeoutError):
+                self._recycle_silent_channel(getattr(method, "channel", None), sent_at)
             self._handle_error(e)
 
     async def start(
@@ -513,10 +571,12 @@ class Node(PasarGuardNode):
         chunk_count = max(1, math.ceil(len(users) / chunk_size))
         budget = timeout + self._internal_timeout * (chunk_count + 2)
         async with self._node_lock:
+            method = self._client.SyncUsersChunked
+            sent_at = time.monotonic()
             try:
                 async with (
                     asyncio.timeout(budget),
-                    self._client.SyncUsersChunked.open(metadata=self._metadata) as stream,
+                    method.open(metadata=self._metadata) as stream,
                 ):
                     if not users:
                         await asyncio.wait_for(
@@ -537,6 +597,8 @@ class Node(PasarGuardNode):
                     await asyncio.wait_for(stream.recv_message(), timeout=timeout)
                     return []
             except Exception as e:
+                if isinstance(e, TimeoutError):
+                    self._recycle_silent_channel(getattr(method, "channel", None), sent_at)
                 error_type = type(e).__name__
                 self.logger.warning(
                     f"[{self.name}] Chunked gRPC sync failed for {len(users)} user(s) | Error: {error_type} - {e!s}"
