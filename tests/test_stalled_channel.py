@@ -21,6 +21,11 @@ from PasarGuardNodeBridge.grpclib import Node as GrpcNode
 from PasarGuardNodeBridge.storage import InMemoryNodeLifecycleCoordinator, InMemoryUserSyncStore
 from tests.test_tls import certificate
 
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
+
 PING_POLICY = "keepalive-policy-v1"
 NODE_VERSION = "0.6.22"
 CORE = "1.0"
@@ -476,6 +481,35 @@ class StalledChannelInterleavingTests(StalledNodeCase):
         self.assertGreater(recycled_with["connect"] + recycled_with["both"], 0)
         self.assertGreater(totals["failed_on_stalled"], INTERLEAVING_ROUNDS)
         self.assertGreater(totals["answered_after_swap"], INTERLEAVING_ROUNDS)
+
+
+class UVLoopCase:
+    @staticmethod
+    def loop_factory():
+        return uvloop.new_event_loop()
+
+    def _setupAsyncioRunner(self):
+        self._asyncioRunner = asyncio.Runner(debug=True, loop_factory=self.loop_factory)
+
+
+@unittest.skipIf(uvloop is None, "uvloop is unavailable on this platform")
+class UVLoopStalledConnectionTests(UVLoopCase, StalledConnectionTests):
+    pass
+
+
+@unittest.skipIf(uvloop is None, "uvloop is unavailable on this platform")
+class UVLoopReplacementSafetyTests(UVLoopCase, ReplacementSafetyTests):
+    pass
+
+
+@unittest.skipIf(uvloop is None, "uvloop is unavailable on this platform")
+class UVLoopSlowUploadSafetyTests(UVLoopCase, SlowUploadSafetyTests):
+    pass
+
+
+@unittest.skipIf(uvloop is None, "uvloop is unavailable on this platform")
+class UVLoopStalledChannelInterleavingTests(UVLoopCase, StalledChannelInterleavingTests):
+    pass
 
 
 if __name__ == "__main__":

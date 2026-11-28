@@ -13,7 +13,7 @@ from PasarGuardNodeBridge.grpclib import Node as GrpcNode
 from PasarGuardNodeBridge.rest import Node as RestNode
 from PasarGuardNodeBridge.storage import InMemoryNodeLifecycleCoordinator, InMemoryUserSyncStore
 from PasarGuardNodeBridge.utils import create_proxy, create_user
-from tests.test_stalled_channel import NodeService, StallingRelay
+from tests.test_stalled_channel import NodeService, StallingRelay, UVLoopCase, uvloop
 from tests.test_tls import certificate
 
 USERS = 640
@@ -145,6 +145,16 @@ class RestSlowLinkSyncTests(SlowLinkCase):
         await self.node.sync_users(self.users)
         self.assertGreater(time.monotonic() - started, NODE_TIMEOUT)
         self.assertEqual(self.synced, [USERS])
+
+
+@unittest.skipIf(uvloop is None, "uvloop is unavailable on this platform")
+class UVLoopGrpcSlowLinkSyncTests(UVLoopCase, GrpcSlowLinkSyncTests):
+    pass
+
+
+@unittest.skipIf(uvloop is None, "uvloop is unavailable on this platform")
+class UVLoopRestSlowLinkSyncTests(UVLoopCase, RestSlowLinkSyncTests):
+    pass
 
 
 if __name__ == "__main__":
