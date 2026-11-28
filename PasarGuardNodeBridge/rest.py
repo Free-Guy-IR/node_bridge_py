@@ -677,7 +677,7 @@ class Node(PasarGuardNode):
 
                     while b"\n" in buffer:
                         line, buffer = buffer.split(b"\n", 1)
-                        line = line.decode().strip()
+                        line = line.decode(errors="replace").strip()
 
                         if line:
                             try:
