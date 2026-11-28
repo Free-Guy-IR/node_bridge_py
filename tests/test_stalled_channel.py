@@ -1,11 +1,15 @@
 import asyncio
 import logging
+import random
 import tempfile
 import time
 import unittest
+from collections import Counter
+from dataclasses import dataclass
 from unittest.mock import patch
 from uuid import uuid4
 
+from grpclib.client import Channel
 from grpclib.config import Configuration
 from grpclib.const import Cardinality, Handler
 from grpclib.server import Server
@@ -25,6 +29,8 @@ SHORT_PING_WINDOW = 0.5
 SLOW_REPLY_BYTES = 256 * 1024
 SLOW_LINK_BYTES_PER_SECOND = 64 * 1024
 GRPC_GO_INITIAL_WINDOW = 65535
+INTERLEAVING_ROUNDS = 12
+SWAPS = ("none", "tls", "connect", "both")
 
 logger = logging.getLogger("stalled-channel-test")
 logger.setLevel(logging.CRITICAL)
@@ -330,6 +336,129 @@ class SlowUploadSafetyTests(StalledNodeCase):
         self.assertIs(node.channel, first)
         self.assertEqual(self.relay.accepted, 1)
         self.assertEqual(self.relay.open, 1)
+
+
+@dataclass
+class CallRecord:
+    started_on_stalled: bool
+    tls_reconfigured_during_call: bool
+    succeeded: bool
+    error: str
+
+
+class CountingHandler(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.recycles = 0
+
+    def emit(self, record):
+        if "the next calls use a new connection" in record.getMessage():
+            self.recycles += 1
+
+
+class StalledChannelInterleavingTests(StalledNodeCase):
+    async def _round(self, round_index: int, connects: Counter) -> tuple[list[CallRecord], int, str]:
+        rng = random.Random(round_index)
+        swaps = SWAPS[round_index % len(SWAPS)]
+        counter = CountingHandler()
+        round_logger = logging.getLogger(f"stalled-channel-test.round-{round_index}")
+        round_logger.setLevel(logging.WARNING)
+        round_logger.propagate = False
+        round_logger.addHandler(counter)
+        self.service.held_arrived = asyncio.Event()
+        node = await self.connected_node(
+            f"interleave-{round_index}", timeout=1, pings=rng.random() < 0.5, node_logger=round_logger
+        )
+        stalled = node.channel
+        state = {"tls": 0}
+        records: list[CallRecord] = []
+
+        async def call(kind: str, timeout: float, delay: float):
+            await asyncio.sleep(delay)
+            started_on = node.channel
+            tls_before = state["tls"]
+            error = ""
+            try:
+                if kind == "held":
+                    await node.get_system_stats(timeout=timeout)
+                else:
+                    await node.get_backend_stats(timeout=timeout)
+                succeeded = True
+            except NodeAPIError as exc:
+                succeeded, error = False, exc.detail
+            records.append(CallRecord(started_on is stalled, state["tls"] != tls_before, succeeded, error))
+
+        async def reconfigure(delay: float):
+            await asyncio.sleep(delay)
+            state["tls"] += 1
+            await node.configure_tls(server_ca=self.server_ca)
+
+        async def reconnect(delay: float, pings: bool):
+            await asyncio.sleep(delay)
+            self.service.advertises_pings = pings
+            await node.connect(NODE_VERSION, CORE)
+
+        tasks = [asyncio.create_task(call("held", 2, 0)) for _ in range(rng.randint(1, 3))]
+        await asyncio.wait_for(self.service.held_arrived.wait(), 2)
+        self.relay.stall()
+        tasks += [asyncio.create_task(call("unary", rng.uniform(0.2, 0.6), 0)) for _ in range(rng.randint(2, 5))]
+        tasks += [asyncio.create_task(call("unary", 2, rng.uniform(0, 1.0))) for _ in range(rng.randint(3, 8))]
+        if swaps in ("tls", "both"):
+            tasks.append(asyncio.create_task(reconfigure(rng.uniform(0.1, 0.8))))
+        if swaps in ("connect", "both"):
+            tasks.append(asyncio.create_task(reconnect(rng.uniform(0.1, 0.8), rng.random() < 0.5)))
+        await asyncio.wait_for(asyncio.gather(*tasks), 15)
+        after = await asyncio.wait_for(
+            asyncio.gather(*(node.get_backend_stats(timeout=2) for _ in range(3)), return_exceptions=True), 10
+        )
+        self.assertEqual(
+            [type(result).__name__ for result in after], ["BackendStatsResponse"] * 3, f"round {round_index}"
+        )
+        self.assertEqual(await self.relay.settle_to(1), 1, f"round {round_index}: connections left open")
+        reconnected = [channel for channel, count in connects.items() if count > 1]
+        self.assertEqual(reconnected, [], f"round {round_index}: a channel opened a second connection")
+        left_open = [channel for channel in connects if channel is not node.channel and channel._protocol is not None]
+        self.assertEqual(left_open, [], f"round {round_index}: a replaced channel kept its connection")
+        self.assertIsNotNone(node.channel._protocol)
+        self.assertLessEqual(counter.recycles, 1, f"round {round_index}")
+        node._close_chan()
+        self.assertEqual(await self.relay.settle_to(0), 0, f"round {round_index}: connections left after teardown")
+        connects.clear()
+        round_logger.removeHandler(counter)
+        return records, counter.recycles, swaps
+
+    async def test_recycles_racing_calls_tls_reconfiguration_and_the_keepalive_swap(self):
+        connects: Counter = Counter()
+        original = Channel._create_connection
+
+        async def counted(channel):
+            protocol = await original(channel)
+            connects[channel] += 1
+            return protocol
+
+        recycled_with = Counter()
+        totals = Counter()
+        with (
+            patch.object(Channel, "_create_connection", counted),
+            patch.object(grpc_transport, "SILENT_CONNECTION_PING_TIMEOUT", 0.3, create=True),
+        ):
+            for round_index in range(INTERLEAVING_ROUNDS):
+                records, recycles, swaps = await self._round(round_index, connects)
+                recycled_with[swaps] += recycles
+                for record in records:
+                    totals["calls"] += 1
+                    totals["failed_on_stalled"] += record.started_on_stalled and not record.succeeded
+                    totals["answered_after_swap"] += not record.started_on_stalled and record.succeeded
+                    allowed = record.started_on_stalled or record.tls_reconfigured_during_call
+                    self.assertTrue(
+                        record.succeeded or allowed, f"round {round_index}: a call on a healthy channel failed {record}"
+                    )
+        self.assertEqual(sorted(recycled_with), sorted(SWAPS))
+        self.assertGreaterEqual(recycled_with["none"], INTERLEAVING_ROUNDS // len(SWAPS))
+        self.assertGreater(recycled_with["tls"] + recycled_with["both"], 0)
+        self.assertGreater(recycled_with["connect"] + recycled_with["both"], 0)
+        self.assertGreater(totals["failed_on_stalled"], INTERLEAVING_ROUNDS)
+        self.assertGreater(totals["answered_after_swap"], INTERLEAVING_ROUNDS)
 
 
 if __name__ == "__main__":
