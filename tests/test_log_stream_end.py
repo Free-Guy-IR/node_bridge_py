@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from PasarGuardNodeBridge.common import service_pb2 as service
 from PasarGuardNodeBridge.grpclib import Node as GrpcNode
 from PasarGuardNodeBridge.rest import Node as RestNode
 from PasarGuardNodeBridge.storage import InMemoryUserSyncStore
+from tests.test_tls import certificate
 
 LOGGER = "log-stream-end"
 
@@ -263,6 +265,56 @@ class LogStreamEndTests(unittest.IsolatedAsyncioTestCase):
             async with node.stream_logs() as queue:
                 self.assertEqual(await asyncio.wait_for(queue.get(), 5), "one")
         self.assertTrue(queue.empty())
+
+
+class RestLogLineEncodingTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server_ssl, server_ca, _ = certificate(directory)
+        self.release = asyncio.Event()
+
+        async def logs(request):
+            response = web.StreamResponse()
+            await response.prepare(request)
+            for line in (b"first line\n", b"accepted tcp:\xff\xfe.example:443 email: 7\n", b"third line\n"):
+                await response.write(line)
+            await self.release.wait()
+            return response
+
+        app = web.Application()
+        app.router.add_get("/logs", logs)
+        self.runner = web.AppRunner(app)
+        await self.runner.setup()
+        site = web.TCPSite(self.runner, "127.0.0.1", 0, ssl_context=server_ssl)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        self.node = RestNode(
+            address="127.0.0.1",
+            port=port,
+            api_port=port,
+            server_ca=server_ca,
+            api_key="00000000-0000-0000-0000-000000000000",
+            name="logs",
+            node_id="logs-encoding",
+            user_sync_store=InMemoryUserSyncStore(),
+            logger=logging.getLogger(LOGGER),
+        )
+
+    async def asyncTearDown(self):
+        self.release.set()
+        await self.node._client.close()
+        await self.node._json_client.close()
+        await self.runner.cleanup()
+
+    async def test_a_line_that_is_not_utf8_does_not_end_the_rest_log_stream(self):
+        received = []
+        async with self.node.stream_logs() as queue:
+            while len(received) < 3:
+                item = await asyncio.wait_for(queue.get(), 5)
+                received.append(item)
+                if isinstance(item, NodeAPIError):
+                    break
+        self.assertEqual(received, ["first line", "accepted tcp:\ufffd\ufffd.example:443 email: 7", "third line"])
 
 
 if __name__ == "__main__":
