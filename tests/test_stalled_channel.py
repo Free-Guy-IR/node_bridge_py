@@ -394,6 +394,7 @@ class StalledChannelInterleavingTests(StalledNodeCase):
         stalled = node.channel
         state = {"tls": 0}
         records: list[CallRecord] = []
+        closed_by_tls = []
 
         async def call(kind: str, timeout: float, delay: float):
             await asyncio.sleep(delay)
@@ -413,6 +414,7 @@ class StalledChannelInterleavingTests(StalledNodeCase):
         async def reconfigure(delay: float):
             await asyncio.sleep(delay)
             state["tls"] += 1
+            closed_by_tls.append(node.channel)
             await node.configure_tls(server_ca=self.server_ca)
 
         async def reconnect(delay: float, pings: bool):
@@ -437,8 +439,10 @@ class StalledChannelInterleavingTests(StalledNodeCase):
             [type(result).__name__ for result in after], ["BackendStatsResponse"] * 3, f"round {round_index}"
         )
         self.assertEqual(await self.relay.settle_to(1), 1, f"round {round_index}: connections left open")
-        reconnected = [channel for channel, count in connects.items() if count > 1]
+        reconnected = [channel for channel, count in connects.items() if count > 1 and channel not in closed_by_tls]
         self.assertEqual(reconnected, [], f"round {round_index}: a channel opened a second connection")
+        if stalled not in closed_by_tls:
+            self.assertEqual(connects[stalled], 1, f"round {round_index}: the silent channel connected again")
         left_open = [channel for channel in connects if channel is not node.channel and channel._protocol is not None]
         self.assertEqual(left_open, [], f"round {round_index}: a replaced channel kept its connection")
         self.assertIsNotNone(node.channel._protocol)
